@@ -13,7 +13,11 @@ from torch.utils.data import DataLoader
 import deepclean_prod as dc
 import deepclean_prod.config as config
 
+# Default tensor type
 torch.set_default_tensor_type(torch.FloatTensor)
+
+# Use GPU if available
+device = dc.nn.utils.get_device()
 
 
 def parse_cmd():
@@ -83,10 +87,6 @@ params =  parse_cmd()
 print('Create output directory: {}'.format(params.outdir))
 os.makedirs(params.outdir, exist_ok=True)
 
-# Use GPU if available
-device = dc.nn.utils.get_device()
-# device = 'cpu'
-
 # Get data from NDS server or local
 train_data = dc.timeseries.TimeSeriesSegmentDataset(
     params.train_kernel, params.train_stride, params.pad_mode)
@@ -127,7 +127,6 @@ if params.datadir is not None:
 else:
     fetch_data()
     
-    
 # Preprocess data
 print('Preprocessing')
 # bandpass filter
@@ -148,13 +147,11 @@ with open(os.path.join(params.outdir, 'ppr.bin'), 'wb') as f:
         'std': std,
     }, f, protocol=-1)
 
-
 # Read dataset into DataLoader
 train_loader = DataLoader(
     train_data, params.batch_size, num_workers=params.num_workers)
 val_loader = DataLoader(
     val_data, params.batch_size, num_workers=params.num_workers)
-
 
 # Creating model, loss function, optimizer and lr scheduler
 print('Creating neural network, loss function, optimizer, etc.')
@@ -172,7 +169,6 @@ optimizer = optim.Adam(
     model.parameters(), lr=params.lr, weight_decay=params.weight_decay)
 
 lr_scheduler = optim.lr_scheduler.StepLR(optimizer, 10, 0.1)
-
 
 # Start training
 logger = dc.logger.Logger(outdir=params.outdir, metrics=['loss'])
