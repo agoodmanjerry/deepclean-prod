@@ -1,3 +1,1 @@
-# deepclean-prod
-
-DeepClean production pipeline
+Production pipeline for DeepClean: LIGO non-linear noise regression algorithm
