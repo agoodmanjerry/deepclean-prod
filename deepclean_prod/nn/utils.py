@@ -23,21 +23,18 @@ def print_train():
     print('------------------------------------')
     
 
-def get_device(use_gpu=True):
+def get_device():
     ''' Convenient function to set up hardward '''
-    if not use_gpu:
-        print('Device: CPU')
-        return torch.device('cpu')
-    if (not torch.cuda.is_available()):
-        if use_gpu:
-            print('WARNING: GPU is not available. Use CPU instead.')
-            print('Device: CPU')
-        return torch.device('cpu')
-    
-    device = torch.device('cuda')
-    print('Device: %s' % torch.cuda.get_device_name(device))
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        total_memory = torch.cuda.get_device_properties(device).total_memory
+        total_memory *= 1e-9 # convert bytes to Gb
+        print('- Use device: {}'.format(torch.cuda.get_device_name(device)))
+        print('- Total memory: {:.4f} GB'.format(total_memory))
+    else:
+        print('- Use device: CPU')
     return device
-    
+
 
 def train(train_loader, model, criterion, optimizer, lr_scheduler, 
           val_loader=None, max_epochs=1, logger=None, device='cpu'):
