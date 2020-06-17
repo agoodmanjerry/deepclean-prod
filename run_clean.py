@@ -44,7 +44,7 @@ params = parse_cmd()
 config = dc.io.parser.parse_section(params.config, 'config')
 
 # Call training script
-clean_cmd = './dc-prod-clean.py '
+clean_cmd = 'dc-prod-clean '
 clean_append = create_append(config, CLEAN_PARAMS)
 clean_cmd += clean_append
 print('Run cmd: ' + clean_cmd)

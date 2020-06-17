@@ -47,7 +47,7 @@ config = dc.io.parser.parse_section(params.config, 'config')
 
 
 # Call training script
-train_cmd = './dc-prod-train.py '
+train_cmd = 'dc-prod-train '
 train_append = create_append(config, TRAIN_PARAMS)
 train_cmd += train_append
 print('Run cmd: ' + train_cmd)
