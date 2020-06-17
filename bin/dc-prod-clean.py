@@ -1,0 +1,149 @@
+#!/usr/bin/env python
+
+import os
+import copy
+import pickle
+import argparse
+
+import torch
+from torch.utils.data import DataLoader
+
+import deepclean_prod as dc
+from deepclean_prod import config
+
+from gwpy.timeseries import TimeSeries
+
+# Default tensor type
+torch.set_default_tensor_type(torch.FloatTensor)
+
+# Use GPU if available
+device = dc.nn.utils.get_device()
+
+def parse_cmd():
+    
+    parser = argparse.ArgumentParser(
+        prog=os.path.basename(__file__), usage='%(prog)s [options]')
+    
+    # Dataset arguments
+    parser.add_argument('--t0', help='GPS of the first sample', type=int)
+    parser.add_argument('--duration', help='Duration of frame', type=int)
+    parser.add_argument('--chanslist', help='Path to channel list', type=str)
+    parser.add_argument('--fs', help='Sampling frequency', 
+                        default=config.DEFAULT_SAMPLE_RATE, type=float)
+
+    # Timeseries arguments
+    parser.add_argument('--clean-kernel', help='Length of each segment in seconds', 
+                        default=config.DEFAULT_CLEAN_KERNEL, type=float)
+    parser.add_argument('--clean-stride', help='Stride between segments in seconds', 
+                        default=config.DEFAULT_CLEAN_STRIDE, type=float)
+    parser.add_argument('--pad-mode', help='Padding mode', 
+                        default=config.DEFAULT_PAD_MODE, type=str)
+    
+    # Post-processing arguments
+    parser.add_argument('--window', help='Window to apply to overlap-add',
+                        default=config.DEFAULT_WINDOW, type=str)
+
+    # Input/output arguments    
+    parser.add_argument('--train-dir', help='Path to training directory', 
+                        default='.', type=str)
+    parser.add_argument('--checkpoint', help='Path to model checkpoint', type=str)
+    parser.add_argument('--ppr-file', help='Path to preprocessing setting', type=str)
+    parser.add_argument('--out-dir', help='Path to output file',
+                        default='.', type=str)
+    parser.add_argument('--out-file', help='Path to output file', type=str)
+    parser.add_argument('--out-channel', help='Name of output channel', type=str)
+    parser.add_argument('--load-dataset', help='Load dataset',
+                        default=False, type=dc.io.parser.str2bool)
+    parser.add_argument('--save-dataset', help='Save dataset', 
+                        default=False, type=dc.io.parser.str2bool)    
+
+    params = parser.parse_args()
+
+    return params
+
+params =  parse_cmd()
+
+# Create output directory
+if params.out_dir is not None:
+    os.makedirs(params.out_dir, exist_ok=True)
+    
+# Get time-series data from NDS server or local
+data = dc.timeseries.TimeSeriesSegmentDataset(
+    params.clean_kernel, params.clean_stride, params.pad_mode)
+
+if (params.t0 is None) and (params.duration is None):
+    print('GPS Time not given. Fetching from output directory: {}'.format(
+        params.out_dir))
+    data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
+elif params.load_dataset:
+    print('Fetching dataset from output directory: {}'.format(params.out_dir))
+    data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
+else:
+    print('Fetching raw data from {} .. {}'.format(
+        params.t0, params.t0 + params.duration))
+    data.fetch(params.chanslist, params.t0, params.duration, params.fs)
+    if params.save_dataset:
+        data.write(os.path.join(params.out_dir, 'raw.h5'))
+
+# Preprocess data
+print('Preprocessing')
+# fetch preprocess setting
+if params.ppr_file is None:
+    params.ppr_file = os.path.join(params.train_dir, 'ppr.bin')
+with open(params.ppr_file, 'rb') as f:
+    ppr = pickle.load(f)
+    mean = ppr['mean']
+    std = ppr['std']
+    filt_fl = ppr['filt_fl']
+    filt_fh = ppr['filt_fh']
+    filt_order = ppr['filt_order']
+# bandpass filter and normalization
+preprocessed = data.bandpass(filt_fl, filt_fh, filt_order, 'target')
+preprocessed = preprocessed.normalize(mean, std)
+        
+# Load preprocessed data into dataloader
+data_loader = DataLoader(
+    preprocessed, batch_size=config.DEFAULT_BATCH_SIZE,
+    num_workers=config.DEFAULT_NUM_WORKERS, shuffle=False)
+
+# Creating model and load from checkpoint
+model = dc.nn.net.DeepClean(preprocessed.n_channels - 1)
+model = model.to(device)  # transfer model to GPU if available
+print(model)
+
+if params.checkpoint is None:
+    params.checkpoint = dc.nn.utils.get_last_checkpoint(
+        os.path.join(params.train_dir, 'models'))
+print('Loading model from checkpoint: {}',format(params.checkpoint))
+model.load_state_dict(torch.load(params.checkpoint, map_location=device))
+
+
+# Start data cleaning
+print('Cleaning')
+target = data.get_target()  # get raw data
+
+# predict noise from auxilliary channels
+pred_batches = dc.nn.utils.evaluate(data_loader, model, device=device)
+
+# post-processing the prediction
+# overlap-add to join together prediction
+noverlap = int((preprocessed.kernel - preprocessed.stride) * preprocessed.fs)
+pred = dc.signal.overlap_add(pred_batches, noverlap, params.window)
+# convert back to unit of target
+pred *= std[preprocessed.target_idx].ravel()
+pred += mean[preprocessed.target_idx].ravel()
+# apply bandpass filter
+pred = dc.signal.filter_add(pred, preprocessed.fs, filt_fl, filt_fh, filt_order)
+# because of data padding, we apply a cut to the output
+pred = pred[:target.size]
+
+# subtract noise prediction from raw data
+clean = target - pred 
+
+# Save clean data
+if params.out_file is None:
+    params.out_file = os.path.join(params.out_dir, 'clean.h5')
+print('Writing output to {}'.format(params.out_file))
+series = TimeSeries(clean, t0=data.t0, sample_rate=data.fs, 
+                    channel=params.out_channel, name=params.out_channel)
+series.write(params.out_file, append=True, overwrite=True)

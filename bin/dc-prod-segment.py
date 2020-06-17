@@ -1,0 +1,87 @@
+
+import argparse
+
+import numpy as np
+
+from gwpy.segments import DataQualityFlag
+
+def parse_cmd():
+    
+    parser = argparse.ArgumentParser(
+        prog=os.path.basename(__file__), usage='%(prog)s [options]')
+
+    parser.add_argument('--t0', help='Start GPS time for subtraction', type=int)
+    parser.add_argument('--t1', help='End GPS time for subtraction', type=int)
+    parser.add_argument('--ifo', help='Interferometer to use. Either H1 or L1', 
+                        type=str)
+    parser.add_argument('--out_file', help='Output text file to write', 
+                        default='out_segment.txt', type=str)
+    
+    params = parser.parse_args()
+    
+    return params
+    
+params = parse_cmd()
+
+# Read in segment data
+if params.ifo == 'H1':
+    segments = DataQualityFlag.query(
+        'H1:DMT-ANALYSIS_READY:1', params.t0, params.t1)
+elif params.ifo == 'L1':
+    segments = DataQualityFlag.query(
+        'L1:DMT-ANALYSIS_READY:1', params.t0, params.t1)
+else:
+    raise ValueError(f'ifo {ifo} not recognized. Must either be H1 or L1')
+    
+# Getting training and cleaning time
+train_start, train_end = [], []
+clean_start, clean_end = [], []
+
+for seg in segments.active:
+    seg_len = seg.end - seg.start
+
+    if seg_len < 300:
+        # TODO: Not sure what to do in this case yet
+        continue
+    elif (300 < seg_len) and (seg_len < 4 * 4096):
+        train_duration = min(600, seg_len / 2.)
+        train_start.append(float(seg.start))
+        train_end.append(float(seg.start) + train_duration)
+        clean_start.append(float(seg.start) + train_duration)
+        clean_end.append(float(seg.end))
+
+    elif 4 * 4096 < seg_len:
+        # divide into chunk of maximum length of 4 * 4096
+        chunks_start = np.arange(seg.start, seg.end, 4 * 4096)
+        chunks_end = chunks_start + 4 * 4096
+        if chunks_end[-1] > seg.end:
+            chunks_end[-1] = seg.end
+
+        for i, (chunk_start, chunk_end) in enumerate(zip(chunks_start, chunks_end)):
+            train_duration = 600
+            if i > 0:
+                train_start.append(float(chunk_start) - train_duration)
+                train_end.append(float(chunk_start))
+                clean_start.append(float(chunk_start))
+                clean_end.append(float(chunk_end))
+            else:
+                train_start.append(float(chunk_start))
+                train_end.append(float(chunk_start) + train_duration)
+                clean_start.append(float(chunk_start) + train_duration)
+                clean_end.append(float(chunk_end))
+
+# Convert to numpy.ndarray
+train_start = np.stack(train_start)
+train_end = np.stack(train_end)
+clean_start = np.stack(clean_start)
+clean_end = np.stack(clean_end)
+
+# Get duration
+train_duration = train_end - train_start
+clean_duration = clean_end - clean_start
+
+# Write output file
+data = np.stack([train_start, train_end, train_duration, 
+                 clean_start, clean_end, clean_duration], axis=1)
+header = 'train-t0  train-t1  train-dur  clean-t0  clean-t1  clean-dur'
+np.savetxt(params.out_file, data, fmt='%d', header=header)
