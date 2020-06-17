@@ -19,7 +19,6 @@ torch.set_default_tensor_type(torch.FloatTensor)
 # Use GPU if available
 device = dc.nn.utils.get_device()
 
-
 def parse_cmd():
     
     parser = argparse.ArgumentParser(
@@ -73,10 +72,12 @@ def parse_cmd():
                         default=config.DEFAULT_MSE_WEIGHT, type=float)
     
     # input/output arguments
-    parser.add_argument('--outdir', help='Path to output directory', type=str)
-    parser.add_argument('--datadir', help='Path to data directory', type=str)
+    parser.add_argument('--train-dir', help='Path to training directory', 
+                        default='.', type=str)
+    parser.add_argument('--load-dataset', help='Load training dataset',
+                        default=False, type=dc.io.parser.str2bool)
     parser.add_argument('--save-dataset', help='Save training dataset', 
-                        default=False, type=bool)
+                        default=False, type=dc.io.parser.str2bool)
     
     params = parser.parse_args()
     return params
@@ -84,8 +85,8 @@ def parse_cmd():
 params =  parse_cmd()
 
 # Create output directory
-print('Create output directory: {}'.format(params.outdir))
-os.makedirs(params.outdir, exist_ok=True)
+print('Create training directory: {}'.format(params.train_dir))
+os.makedirs(params.train_dir, exist_ok=True)
 
 # Get data from NDS server or local
 train_data = dc.timeseries.TimeSeriesSegmentDataset(
@@ -93,40 +94,37 @@ train_data = dc.timeseries.TimeSeriesSegmentDataset(
 val_data = dc.timeseries.TimeSeriesSegmentDataset(
     params.train_kernel, params.train_stride, params.pad_mode)
 
-def fetch_data():
+if (params.train_t0 is None) and (params.train_duration is None):
+    print('GPS Time not given. Fetching from training directory: {}'.format(
+        params.train_dir))
+    
+    train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
+    val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
+elif params.load_dataset:
+    print('Fetch from training directory: {}'.format(params.train_dir))
+
+    train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
+    val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
+else:
     # Partition into training and validation dataset
     train_t0 = params.train_t0
     train_duration = int(params.train_duration * params.train_frac)
     val_t0 = train_t0 + train_duration
     val_duration = params.train_duration - train_duration
     
-    print('Fetching training data from {} .. {}'.format(train_t0, train_t0 + train_duration))
+    print('Fetching training data from {} .. {}'.format(
+        train_t0, train_t0 + train_duration))
     train_data.fetch(params.chanslist, train_t0, train_duration, params.fs)
 
-    print('Fetching validation data from {} .. {}'.format(val_t0, val_t0 + val_duration))
+    print('Fetching validation data from {} .. {}'.format(
+        val_t0, val_t0 + val_duration))
     val_data.fetch(params.chanslist, val_t0, val_duration, params.fs)
 
     # Save training/validation data if enabled
     if params.save_dataset:
-        train_data.write(os.path.join(params.outdir, 'training.h5'))
-        val_data.write(os.path.join(params.outdir, 'validation.h5'))
+        train_data.write(os.path.join(params.train_dir, 'training.h5'))
+        val_data.write(os.path.join(params.train_dir, 'validation.h5'))
 
-if params.datadir is not None:
-    print('Data directory is given. Fetching from directory: {}'.format(params.datadir))
-
-    train_datafile = os.path.join(params.datadir, 'training.h5')
-    val_datafile = os.path.join(params.datadir, 'validation.h5')
-    
-    if os.path.exists(train_datafile) and os.path.exists(val_datafile):
-        train_data.read(train_datafile, params.chanslist)
-        val_data.read(val_datafile, params.chanslist)
-    else:
-        print('Either training or validation data file does not exist. '\
-              'Downloading data instead.')
-        fetch_data()
-else:
-    fetch_data()
-    
 # Preprocess data
 print('Preprocessing')
 # bandpass filter
@@ -141,10 +139,13 @@ train_data = train_data.normalize()
 val_data = val_data.normalize(mean, std)
 
 # Save preprocessing setting
-with open(os.path.join(params.outdir, 'ppr.bin'), 'wb') as f:
+with open(os.path.join(params.train_dir, 'ppr.bin'), 'wb') as f:
     pickle.dump({
         'mean': mean,
         'std': std,
+        'filt_fl': params.filt_fl,
+        'filt_fh': params.filt_fh,
+        'filt_order': params.filt_order,
     }, f, protocol=-1)
 
 # Read dataset into DataLoader
@@ -156,8 +157,8 @@ val_loader = DataLoader(
 # Creating model, loss function, optimizer and lr scheduler
 print('Creating neural network, loss function, optimizer, etc.')
 model = dc.nn.net.DeepClean(train_data.n_channels - 1)
-print(model)
 model = model.to(device)  # transfer model to GPU if available
+print(model)
 
 criterion = dc.criterion.CompositePSDLoss(
     params.fs, params.filt_fl, params.filt_fh,
@@ -171,7 +172,7 @@ optimizer = optim.Adam(
 lr_scheduler = optim.lr_scheduler.StepLR(optimizer, 10, 0.1)
 
 # Start training
-logger = dc.logger.Logger(outdir=params.outdir, metrics=['loss'])
+logger = dc.logger.Logger(outdir=params.train_dir, metrics=['loss'])
 dc.nn.utils.train(
     train_loader, model, criterion, optimizer, lr_scheduler,
     val_loader=val_loader, max_epochs=params.max_epochs, logger=logger, 

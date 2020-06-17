@@ -10,7 +10,7 @@ TRAIN_PARAMS = ('chanslist', 'train_t0', 'fs', 'train_duration', 'train_frac',
                 'filt_fl', 'filt_fh', 'filt_order', 'train_kernel', 'train_stride', 
                 'pad_mode', 'batch_size', 'max_epochs', 'num_workers', 'lr', 
                 'weight_decay', 'fftlength', 'overlap', 'psd_weight', 'mse_weight', 
-                'outdir', 'datadir', 'save_dataset')
+                'train_dir', 'save_dataset', 'load_dataset')
 
 def create_append(params, keys=None):
     # if no key is given, take all
