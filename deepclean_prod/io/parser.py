@@ -10,7 +10,7 @@ def dict2str(d):
     return d
 
 def str2bool(v):
-  return str(v).lower() in ("yes", "true", "t", "1")
+    return str(v).lower() in ("yes", "true", "t", "1")
 
 def parse_section(config_f, section):
     ''' Parse one section '''
