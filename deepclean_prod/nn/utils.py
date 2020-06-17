@@ -1,4 +1,6 @@
 
+import os
+
 import numpy as np
 
 import torch
@@ -22,6 +24,14 @@ def print_train():
     print('------------------------------------')
     print('------------------------------------')
     
+def get_last_checkpoint(directory, max_epochs=10000):
+    ''' Get last checkpoint of a model from a directory '''
+    checkpoint = None
+    for i in range(max_epochs):
+        temp = os.path.join(directory, f'epoch_{i}')
+        if not os.path.exists(temp):
+            return checkpoint
+        checkpoint = temp
 
 def get_device():
     ''' Convenient function to set up hardward '''
