@@ -1,4 +1,6 @@
+#!/usr/bin/env python
 
+import os
 import argparse
 
 import numpy as np
@@ -14,7 +16,7 @@ def parse_cmd():
     parser.add_argument('--t1', help='End GPS time for subtraction', type=int)
     parser.add_argument('--ifo', help='Interferometer to use. Either H1 or L1', 
                         type=str)
-    parser.add_argument('--out_file', help='Output text file to write', 
+    parser.add_argument('--segment-file', help='Output text file to write', 
                         default='out_segment.txt', type=str)
     
     params = parser.parse_args()
@@ -84,4 +86,4 @@ clean_duration = clean_end - clean_start
 data = np.stack([train_start, train_end, train_duration, 
                  clean_start, clean_end, clean_duration], axis=1)
 header = 'train-t0  train-t1  train-dur  clean-t0  clean-t1  clean-dur'
-np.savetxt(params.out_file, data, fmt='%d', header=header)
+np.savetxt(params.segment_file, data, fmt='%d', header=header)

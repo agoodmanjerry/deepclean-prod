@@ -75,9 +75,9 @@ def parse_cmd():
     parser.add_argument('--train-dir', help='Path to training directory', 
                         default='.', type=str)
     parser.add_argument('--load-dataset', help='Load training dataset',
-                        default=False, type=dc.io.parser.str2bool)
+                        default=False, type=dc.io.str2bool)
     parser.add_argument('--save-dataset', help='Save training dataset', 
-                        default=False, type=dc.io.parser.str2bool)
+                        default=False, type=dc.io.str2bool)
     
     params = parser.parse_args()
     return params
