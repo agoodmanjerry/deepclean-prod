@@ -1,10 +1,10 @@
 
 import os
+import logging
 
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-
 import torch
 
 # default plotting style
@@ -12,6 +12,8 @@ plt.style.use('seaborn-colorblind')
 mpl.rc('font', size=15)
 mpl.rc('figure', figsize=(8, 5))
 
+logger = logging.getLogger(__name__)
+logging.getLogger('matplotlib').setLevel(logging.INFO)
 
 class Logger:
 
@@ -94,10 +96,10 @@ class Logger:
             test_metric = test_metric.data.cpu().numpy()
         
         if show_epoch:
-            print('Epoch: [{}/{}], Batch Num: [{}/{}]'.format(
+            logger.info('Epoch: [{}/{}], Batch Num: [{}/{}]'.format(
                 epoch,num_epochs, n_batch, num_batches)
                  )
-        print('Train {0:}: {1:.4e}, Test {0:}: {2:.4e}'.format(
+        logger.info('Train {0:}: {1:.4e}, Test {0:}: {2:.4e}'.format(
             name, train_metric, test_metric))
 
     def save_model(self, model, epoch, n_batch=None):

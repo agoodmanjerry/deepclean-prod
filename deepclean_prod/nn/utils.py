@@ -1,5 +1,8 @@
 
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -10,19 +13,19 @@ from ..logger import Logger
 
 def print_train():
     ''' Most important function '''
-    print('------------------------------------')
-    print('------------------------------------')
-    print('')
-    print('         ..oo0  ...ooOO00           ')
-    print('        ..     ...             !!!  ')
-    print('       ..     ...      o       \o/  ')
-    print('   Y  ..     /III\    /L ---    n   ')
-    print('  ||__II_____|\_/| ___/_\__ ___/_\__')
-    print('  [[____\_/__|/_\|-|______|-|______|')
-    print(' //0 ()() ()() 0   00    00 00    00')
-    print('')
-    print('------------------------------------')
-    print('------------------------------------')
+    logger.info('------------------------------------')
+    logger.info('------------------------------------')
+    logger.info('')
+    logger.info('         ..oo0  ...ooOO00           ')
+    logger.info('        ..     ...             !!!  ')
+    logger.info('       ..     ...      o       \o/  ')
+    logger.info('   Y  ..     /III\    /L ---    n   ')
+    logger.info('  ||__II_____|\_/| ___/_\__ ___/_\__')
+    logger.info('  [[____\_/__|/_\|-|______|-|______|')
+    logger.info(' //0 ()() ()() 0   00    00 00    00')
+    logger.info('')
+    logger.info('------------------------------------')
+    logger.info('------------------------------------')
     
 def get_last_checkpoint(directory, max_epochs=10000):
     ''' Get last checkpoint of a model from a directory '''
@@ -39,10 +42,10 @@ def get_device():
     if device.type == 'cuda':
         total_memory = torch.cuda.get_device_properties(device).total_memory
         total_memory *= 1e-9 # convert bytes to Gb
-        print('- Use device: {}'.format(torch.cuda.get_device_name(device)))
-        print('- Total memory: {:.4f} GB'.format(total_memory))
+        logger.info('- Use device: {}'.format(torch.cuda.get_device_name(device)))
+        logger.info('- Total memory: {:.4f} GB'.format(total_memory))
     else:
-        print('- Use device: CPU')
+        logger.info('- Use device: CPU')
     return device
 
 

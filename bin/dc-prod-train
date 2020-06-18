@@ -3,6 +3,7 @@
 import os
 import pickle
 import argparse
+import logging.config
 
 import numpy as np
 
@@ -78,14 +79,18 @@ def parse_cmd():
                         default=False, type=dc.io.str2bool)
     parser.add_argument('--save-dataset', help='Save training dataset', 
                         default=False, type=dc.io.str2bool)
+    parser.add_argument('--log', help='Log file', type=str)
     
     params = parser.parse_args()
     return params
 
 params =  parse_cmd()
 
+logging.basicConfig(filename=params.log, filemode='a', 
+                    format='%(asctime)s - %(message)s', level=logging.DEBUG)
+
 # Create output directory
-print('Create training directory: {}'.format(params.train_dir))
+logging.info('Create training directory: {}'.format(params.train_dir))
 os.makedirs(params.train_dir, exist_ok=True)
 
 # Get data from NDS server or local
@@ -95,13 +100,13 @@ val_data = dc.timeseries.TimeSeriesSegmentDataset(
     params.train_kernel, params.train_stride, params.pad_mode)
 
 if (params.train_t0 is None) and (params.train_duration is None):
-    print('GPS Time not given. Fetching from training directory: {}'.format(
+    logging.info('GPS Time not given. Fetching from training directory: {}'.format(
         params.train_dir))
     
     train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
     val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
 elif params.load_dataset:
-    print('Fetch from training directory: {}'.format(params.train_dir))
+    logging.info('Fetch from training directory: {}'.format(params.train_dir))
 
     train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
     val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
@@ -112,11 +117,11 @@ else:
     val_t0 = train_t0 + train_duration
     val_duration = params.train_duration - train_duration
     
-    print('Fetching training data from {} .. {}'.format(
+    logging.info('Fetching training data from {} .. {}'.format(
         train_t0, train_t0 + train_duration))
     train_data.fetch(params.chanslist, train_t0, train_duration, params.fs)
 
-    print('Fetching validation data from {} .. {}'.format(
+    logging.info('Fetching validation data from {} .. {}'.format(
         val_t0, val_t0 + val_duration))
     val_data.fetch(params.chanslist, val_t0, val_duration, params.fs)
 
@@ -126,7 +131,7 @@ else:
         val_data.write(os.path.join(params.train_dir, 'validation.h5'))
 
 # Preprocess data
-print('Preprocessing')
+logging.info('Preprocessing')
 # bandpass filter
 train_data = train_data.bandpass(
     params.filt_fl, params.filt_fh, params.filt_order, 'target')
@@ -155,10 +160,10 @@ val_loader = DataLoader(
     val_data, params.batch_size, num_workers=params.num_workers)
 
 # Creating model, loss function, optimizer and lr scheduler
-print('Creating neural network, loss function, optimizer, etc.')
+logging.info('Creating neural network, loss function, optimizer, etc.')
 model = dc.nn.net.DeepClean(train_data.n_channels - 1)
 model = model.to(device)  # transfer model to GPU if available
-print(model)
+logging.info(model)
 
 criterion = dc.criterion.CompositePSDLoss(
     params.fs, params.filt_fl, params.filt_fh,
@@ -172,8 +177,8 @@ optimizer = optim.Adam(
 lr_scheduler = optim.lr_scheduler.StepLR(optimizer, 10, 0.1)
 
 # Start training
-logger = dc.logger.Logger(outdir=params.train_dir, metrics=['loss'])
+train_logger = dc.logger.Logger(outdir=params.train_dir, metrics=['loss'])
 dc.nn.utils.train(
     train_loader, model, criterion, optimizer, lr_scheduler,
-    val_loader=val_loader, max_epochs=params.max_epochs, logger=logger, 
+    val_loader=val_loader, max_epochs=params.max_epochs, logger=train_logger, 
     device=device)

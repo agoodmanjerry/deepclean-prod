@@ -1,5 +1,8 @@
 
+import logging
 import configparser
+
+logger = logging.getLogger(__name__)
 
 ALL_PARAMS_KEYS = (
     'ifo', 'chanslist', 't0', 't1', 'clean_t0', 'clean_duration', 'train_t0', 
@@ -8,7 +11,7 @@ ALL_PARAMS_KEYS = (
     'window', 'batch_size', 'max_epochs', 'num_workers', 'lr', 'weight_decay', 
     'fft_length', 'overlap', 'psd_weight', 'mse_weight', 'train_dir', 'checkpoint', 
     'ppr_file','out_dir', 'out_file', 'out_channel', 'prefix', 'save_dataset', 
-    'load_dataset'
+    'load_dataset', 'nproc', 'log',
 )
 
 
@@ -31,7 +34,7 @@ def parse_config(config_fname, section='config'):
     for key, val in parser.items(section):
         # ignore unexpected key
         if key not in ALL_PARAMS_KEYS: 
-            print('WARNING: Do not recognize key "%s".' % key)
+            logger.warning('WARNING: Do not recognize key "%s".' % key)
             continue 
         val = val.split(', ')
         if len(val) == 1:

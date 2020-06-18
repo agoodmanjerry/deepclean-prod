@@ -4,6 +4,8 @@ import os
 import copy
 import pickle
 import argparse
+import logging
+
 
 import torch
 from torch.utils.data import DataLoader
@@ -55,13 +57,17 @@ def parse_cmd():
     parser.add_argument('--load-dataset', help='Load dataset',
                         default=False, type=dc.io.str2bool)
     parser.add_argument('--save-dataset', help='Save dataset', 
-                        default=False, type=dc.io.str2bool)    
+                        default=False, type=dc.io.str2bool)
+    parser.add_argument('--log', help='Log file', type=str)
 
     params = parser.parse_args()
 
     return params
 
 params =  parse_cmd()
+
+logging.basicConfig(filename=params.log, filemode='a',
+                    format='%(asctime)s - %(message)s', level=logging.DEBUG)
 
 # Create output directory
 if params.out_dir is not None:
@@ -72,21 +78,21 @@ data = dc.timeseries.TimeSeriesSegmentDataset(
     params.clean_kernel, params.clean_stride, params.pad_mode)
 
 if (params.clean_t0 is None) and (params.clean_duration is None):
-    print('GPS Time not given. Fetching from output directory: {}'.format(
+    logging.info('GPS Time not given. Fetching from output directory: {}'.format(
         params.out_dir))
     data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
 elif params.load_dataset:
-    print('Fetching dataset from output directory: {}'.format(params.out_dir))
+    logging.info('Fetching dataset from output directory: {}'.format(params.out_dir))
     data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
 else:
-    print('Fetching raw data from {} .. {}'.format(
+    logging.info('Fetching raw data from {} .. {}'.format(
         params.clean_t0, params.clean_t0 + params.clean_duration))
     data.fetch(params.chanslist, params.clean_t0, params.clean_duration, params.fs)
     if params.save_dataset:
         data.write(os.path.join(params.out_dir, 'raw.h5'))
 
 # Preprocess data
-print('Preprocessing')
+logging.info('Preprocessing')
 # fetch preprocess setting
 if params.ppr_file is None:
     params.ppr_file = os.path.join(params.train_dir, 'ppr.bin')
@@ -109,17 +115,16 @@ data_loader = DataLoader(
 # Creating model and load from checkpoint
 model = dc.nn.net.DeepClean(preprocessed.n_channels - 1)
 model = model.to(device)  # transfer model to GPU if available
-print(model)
+logging.info(model)
 
 if params.checkpoint is None:
     params.checkpoint = dc.nn.utils.get_last_checkpoint(
         os.path.join(params.train_dir, 'models'))
-print('Loading model from checkpoint: {}',format(params.checkpoint))
+logging.info('Loading model from checkpoint: {}'.format(params.checkpoint))
 model.load_state_dict(torch.load(params.checkpoint, map_location=device))
 
-
 # Start data cleaning
-print('Cleaning')
+logging.info('Cleaning')
 target = data.get_target()  # get raw data
 
 # predict noise from auxilliary channels
@@ -146,7 +151,7 @@ if params.out_file is None:
 else:
     params.out_file = os.path.join(params.out_dir, params.out_file)
     
-print('Writing output to {}'.format(params.out_file))
+logging.info('Writing output to {}'.format(params.out_file))
 series = TimeSeries(clean, t0=data.t0, sample_rate=data.fs, 
                     channel=params.out_channel, name=params.out_channel)
 series.write(params.out_file)
