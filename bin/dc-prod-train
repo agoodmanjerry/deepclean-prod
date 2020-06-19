@@ -86,7 +86,7 @@ def parse_cmd():
 
 params =  parse_cmd()
 
-logging.basicConfig(filename=params.log, filemode='a', 
+logging.basicConfig(filename=os.path.join(params.train_dir, params.log), filemode='a', 
                     format='%(asctime)s - %(message)s', level=logging.DEBUG)
 
 # Create output directory

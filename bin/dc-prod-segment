@@ -78,12 +78,7 @@ train_end = np.stack(train_end)
 clean_start = np.stack(clean_start)
 clean_end = np.stack(clean_end)
 
-# Get duration
-train_duration = train_end - train_start
-clean_duration = clean_end - clean_start
-
 # Write output file
-data = np.stack([train_start, train_end, train_duration, 
-                 clean_start, clean_end, clean_duration], axis=1)
-header = 'train-t0  train-t1  train-dur  clean-t0  clean-t1  clean-dur'
+data = np.stack([train_start, train_end, clean_start, clean_end], axis=1)
+header = 'train-t0  train-t1  clean-t0  clean-t1'
 np.savetxt(params.segment_file, data, fmt='%d', header=header)
