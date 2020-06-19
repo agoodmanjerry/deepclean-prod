@@ -11,7 +11,8 @@ ALL_PARAMS_KEYS = (
     'window', 'batch_size', 'max_epochs', 'num_workers', 'lr', 'weight_decay', 
     'fft_length', 'overlap', 'psd_weight', 'mse_weight', 'train_dir', 'checkpoint', 
     'ppr_file','out_dir', 'out_file', 'out_channel', 'prefix', 'save_dataset', 
-    'load_dataset', 'nproc', 'log',
+    'load_dataset', 'nproc', 'log', 'job_name', 'accounting_group', 'notification',
+    'universe'
 )
 
 
