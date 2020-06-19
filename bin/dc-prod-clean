@@ -66,13 +66,15 @@ def parse_cmd():
 
 params =  parse_cmd()
 
-logging.basicConfig(filename=os.path.join(params.out_dir, params.log), filemode='a',
-                    format='%(asctime)s - %(message)s', level=logging.DEBUG)
-
 # Create output directory
 if params.out_dir is not None:
     os.makedirs(params.out_dir, exist_ok=True)
-    
+if params.log is not None:
+    params.log = os.path.join(params.out_dir, params.log)
+logging.basicConfig(filename=params.log, filemode='a', 
+                    format='%(asctime)s - %(message)s', level=logging.DEBUG)
+logging.info('Create training directory: {}'.format(params.out_dir))
+
 # Get time-series data from NDS server or local
 data = dc.timeseries.TimeSeriesSegmentDataset(
     params.clean_kernel, params.clean_stride, params.pad_mode)
