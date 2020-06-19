@@ -18,8 +18,6 @@ from gwpy.timeseries import TimeSeries
 # Default tensor type
 torch.set_default_tensor_type(torch.FloatTensor)
 
-# Use GPU if available
-device = dc.nn.utils.get_device()
 
 def parse_cmd():
     
@@ -60,6 +58,10 @@ def parse_cmd():
                         default=False, type=dc.io.str2bool)
     parser.add_argument('--log', help='Log file', type=str)
 
+    # cuda arguments
+    parser.add_argument('--device', help='Device to use', 
+                         default=config.DEFAULT_DEVICE, type=str)
+    
     params = parser.parse_args()
 
     return params
@@ -74,6 +76,9 @@ if params.log is not None:
 logging.basicConfig(filename=params.log, filemode='a', 
                     format='%(asctime)s - %(message)s', level=logging.DEBUG)
 logging.info('Create training directory: {}'.format(params.out_dir))
+
+# Use GPU if available
+device = dc.nn.utils.get_device(params.device)
 
 # Get time-series data from NDS server or local
 data = dc.timeseries.TimeSeriesSegmentDataset(

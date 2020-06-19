@@ -36,9 +36,16 @@ def get_last_checkpoint(directory, max_epochs=10000):
             return checkpoint
         checkpoint = temp
 
-def get_device():
+def get_device(device):
     ''' Convenient function to set up hardward '''
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.lower() == 'cpu':
+        device = torch.device('cpu')
+    elif 'cuda' in device.lower():
+        if torch.cuda.is_available():
+            device = torch.device(device)
+        else:
+            logging.warning('No GPU available. Use CPU instead.')
+            device = torch.device('cpu')
     if device.type == 'cuda':
         total_memory = torch.cuda.get_device_properties(device).total_memory
         total_memory *= 1e-9 # convert bytes to Gb

@@ -8,7 +8,8 @@ from deepclean_prod import io
 # Set default parameters 
 CLEAN_PARAMS = ('chanslist', 'clean_t0', 'clean_duration', 'fs', 'clean_kernel', 'clean_stride', 
                 'pad_mode', 'window', 'train_dir', 'checkpoint', 'ppr_file', 
-                'out_dir', 'out_file', 'out_channel', 'save_dataset', 'load_dataset', 'log')
+                'out_dir', 'out_file', 'out_channel', 'save_dataset', 'load_dataset', 'log', 
+                'device')
 
 
 # Parse command line argument

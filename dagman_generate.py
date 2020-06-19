@@ -15,11 +15,11 @@ TRAIN_PARAMS = ('chanslist', 'train_t0', 'fs', 'train_duration', 'train_frac',
                 'filt_fl', 'filt_fh', 'filt_order', 'train_kernel', 'train_stride', 
                 'pad_mode', 'batch_size', 'max_epochs', 'num_workers', 'lr', 
                 'weight_decay', 'fftlength', 'overlap', 'psd_weight', 'mse_weight', 
-                'train_dir', 'save_dataset', 'load_dataset')
+                'train_dir', 'save_dataset', 'load_dataset', 'device')
 CLEAN_PARAMS = ('chanslist', 'clean_t0', 'clean_duration', 'fs', 'clean_kernel', 
                 'clean_stride', 'pad_mode', 'window', 'train_dir', 'checkpoint', 
                 'ppr_file', 'out_dir', 'out_file', 'out_channel', 'save_dataset', 
-                'load_dataset')
+                'load_dataset', 'device')
 
 def get_keys(data, keys):
     new = {}

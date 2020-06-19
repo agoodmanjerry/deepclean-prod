@@ -12,7 +12,7 @@ ALL_PARAMS_KEYS = (
     'fft_length', 'overlap', 'psd_weight', 'mse_weight', 'train_dir', 'checkpoint', 
     'ppr_file','out_dir', 'out_file', 'out_channel', 'prefix', 'save_dataset', 
     'load_dataset', 'nproc', 'log', 'job_name', 'accounting_group', 'notification',
-    'universe'
+    'universe', 'device'
 )
 
 
