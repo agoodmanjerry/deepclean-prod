@@ -1,5 +1,6 @@
 
 import os
+import sys
 import argparse
 import subprocess
 
@@ -76,6 +77,8 @@ extra_lines = (
 
 # create DAGMAN 
 dagman = Dagman(name='dag_{}'.format(job_name), submit=submit)
+executable_train = os.path.join(os.path.dirname(sys.executable), 'dc-prod-train')
+executable_clean = os.path.join(os.path.dirname(sys.executable), 'dc-prod-clean')
 
 for seg in segment_data:
     
@@ -98,7 +101,7 @@ for seg in segment_data:
     
     job_train = Job(
         name='train_{}'.format(job_name),
-        executable='bin/dc-prod-train',
+        executable=executable_train,
         submit=submit,
         log=log,
         error=error,
@@ -124,7 +127,7 @@ for seg in segment_data:
         
     job_clean = Job(
         name='clean_{}'.format(job_name),
-        executable='bin/dc-prod-clean',
+        executable=executable_clean,
         submit=submit,
         log=log, 
         error=error,
