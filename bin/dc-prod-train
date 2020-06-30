@@ -104,18 +104,27 @@ train_data = dc.timeseries.TimeSeriesSegmentDataset(
 val_data = dc.timeseries.TimeSeriesSegmentDataset(
     params.train_kernel, params.train_stride, params.pad_mode)
 
-if (params.train_t0 is None) and (params.train_duration is None):
-    logging.info('GPS Time not given. Fetching from training directory: {}'.format(
-        params.train_dir))
-    
-    train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
-    val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
-elif params.load_dataset:
-    logging.info('Fetch from training directory: {}'.format(params.train_dir))
+download_data = True
+training_dataset_filename = os.path.join(params.train_dir, 'training.h5')
+validation_dataset_filename = os.path.join(params.train_dir, 'validation.h5')
 
-    train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
-    val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
-else:
+# Decide whether or not to download data
+if (params.train_t0 is None) and (params.train_duration is None):
+    logging.info('GPS Time not given. Fetching from file: {} and {}'.format(
+        training_dataset_filename, validation_dataset_filename))
+    download_data = False
+    if (not os.path.exists(training_dataset_filename)) and (not os.path.exists(validation_dataset_filename)):
+        raise FileNotFoundError('Cannot find both dataset files. File or GPS time must exist')
+elif params.load_dataset:
+    logging.info('Attempting to fetch from dataset file {} and {}'.format(
+        training_dataset_filename, validation_dataset_filename))
+    download_data = False
+    if (not os.path.exists(training_dataset_filename)) and (not os.path.exists(validation_dataset_filename)):
+        logging.info('Cannot find both dataset files. Using GPS Time')
+        download_data = True
+    
+# Download data if needed
+if download_data:
     # Partition into training and validation dataset
     train_t0 = params.train_t0
     train_duration = int(params.train_duration * params.train_frac)
@@ -132,8 +141,16 @@ else:
 
     # Save training/validation data if enabled
     if params.save_dataset:
-        train_data.write(os.path.join(params.train_dir, 'training.h5'))
-        val_data.write(os.path.join(params.train_dir, 'validation.h5'))
+        train_data.write(training_dataset_filename)
+        val_data.write(validation_dataset_filename)
+else:
+    logging.info('Fetch from training data from: {}'.format(
+        training_dataset_filename))
+    train_data.read(training_dataset_filename, params.chanslist)
+
+    logging.info('Fetch from validation data from: {}'.format(
+        validation_dataset_filename))
+    val_data.read(validation_dataset_filename, params.chanslist)
 
 # Preprocess data
 logging.info('Preprocessing')

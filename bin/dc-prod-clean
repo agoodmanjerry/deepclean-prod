@@ -84,19 +84,35 @@ device = dc.nn.utils.get_device(params.device)
 data = dc.timeseries.TimeSeriesSegmentDataset(
     params.clean_kernel, params.clean_stride, params.pad_mode)
 
+download_data = True
+original_dataset_filename = os.path.join(params.out_dir, 'original.h5')
+
+# Decide whether or not to download data
 if (params.clean_t0 is None) and (params.clean_duration is None):
-    logging.info('GPS Time not given. Fetching from output directory: {}'.format(
-        params.out_dir))
-    data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
+    logging.info('GPS Time not given. Fetching from file: {}'.format(
+        original_dataset_filename))
+    download_data = False
+    if not os.path.exists(original_dataset_filename):
+        raise FileNotFoundError('Cannot find dataset file. File or GPS time must exist')
 elif params.load_dataset:
-    logging.info('Fetching dataset from output directory: {}'.format(params.out_dir))
-    data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
-else:
+    logging.info('Attempting to fetch from dataset file {}'.format(
+        original_dataset_filename))
+    download_data = False
+    if not os.path.exists(original_dataset_filename):
+        logging.info('Cannot find dataset file. Using GPS Time')
+        download_data = True
+    
+# Download data if needed
+if download_data:
     logging.info('Fetching raw data from {} .. {}'.format(
         params.clean_t0, params.clean_t0 + params.clean_duration))
     data.fetch(params.chanslist, params.clean_t0, params.clean_duration, params.fs)
     if params.save_dataset:
-        data.write(os.path.join(params.out_dir, 'raw.h5'))
+        data.write(original_dataset_filename)
+else:
+    logging.info('Fetching data from file {}'.format(original_dataset_filename))
+    data.read(original_dataset_filename, params.chanslist)
+
 
 # Preprocess data
 logging.info('Preprocessing')
