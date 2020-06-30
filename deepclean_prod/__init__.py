@@ -3,3 +3,4 @@
 from . import io, config, logger
 from . import nn, criterion
 from . import timeseries, signal
+from . import plot
