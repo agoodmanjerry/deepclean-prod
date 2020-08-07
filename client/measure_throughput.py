@@ -132,7 +132,7 @@ class DataGenerator(Thread):
             self.q.put(samples)
 
             # TODO: do some sort of padding rather than
-            # just doing this wrap? Would this even be
+            # just doing wrapping? Would this even be
             # handled here?
             idx += 1
             idx %= len(self.data[channel])

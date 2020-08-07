@@ -1,5 +1,5 @@
 import argparse
-import six
+import os
 import configparser
 import logging
 
@@ -73,6 +73,18 @@ class ConfigParserAction(argparse.Action):
         for action in required_args:
             action.required = True
 
+        setattr(namespace, self.dest, values)
+
+
+class ChannelListAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        # TODO: put in init, just to lazy to look up the
+        # init signature at the moment
+        assert self.nargs == "+"
+
+        if len(values) == 1 and os.path.exists(values[0]):
+            with open(values[0], 'r') as f:
+                values = f.read().split("\n")
         setattr(namespace, self.dest, values)
 
 
