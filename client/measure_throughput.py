@@ -11,7 +11,7 @@ from tritongrpcclient import grpc_service_pb2
 from tritongrpcclient import grpc_service_pb2_grpc
 
 from deepclean_prod import config
-from parse_utils import build_parser
+from . import parse_utils
 
 
 def get_parser():
@@ -24,7 +24,12 @@ def get_parser():
     # do concatenation/windowing there as custom backend?
     parser.add_argument("--clean-t0", help="GPS of the first sample", type=int)
     parser.add_argument("--clean-duration", help="Duration of frame", type=int)
-    parser.add_argument("--chanslist", help="Path to channel list", type=str)
+    parser.add_argument(
+        "--chanslist",
+        help="Path to channel list",
+        action=parse_utils.ChannelListAction,
+        type=str
+    )
     parser.add_argument(
         "--fs",
         help="Sampling frequency",
@@ -89,6 +94,9 @@ def get_parser():
 # to `args`? Not clear how to kill that
 # Possibly buffer class that has q object and an
 # __iter__ method?
+# TODO: see todo above StreamingInputTensor about
+# implementing as a Process with a Pipe connection
+# out from here to the StreamingInputTensor
 class DataGenerator(Thread):
     def __init__(self, channels, t0, duration, fs, qsize=100):  # TODO: add as cl arg
         # If chanslist is supplied as a list, I'm assuming you've
@@ -146,6 +154,10 @@ class DataGenerator(Thread):
             return None
 
 
+# TODO: implement as separate Process with two Pipe
+# connections, one coming in from data generator,
+# the other going out to main process. Handle
+# preproc here
 class StreamingInputTensor:
     def __init__(self, chanslist, fs, kernel_length):
         if isinstance(channels, str):
@@ -249,6 +261,9 @@ def main(flags):
                 model_version=flags["model_version"],
                 id="deepclean",
             )
+
+            # TODO: infer input names by doing model
+            # status request
             input = grpc_service_pb2.ModelInferRequest().InferInputTensor()
             infer_ctx.run(X)
             times.append(time.time())

@@ -1,4 +1,5 @@
 import os
+import version
 
 import torch
 import tensorrt as trt
@@ -8,12 +9,20 @@ from . import parse_utils
 from deepclean_prod.nn.net import DeepClean
 from deepclean_prod.config import config
 
+
 torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
 
 def soft_makedirs(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
+    # basically just a reminder to myself to
+    # get rid of this function and replace it
+    # with the exist_ok syntax when I'm confident
+    # I have the right version
+    try:
+        os.makedirs(path, exist_ok=True)
+    except TypeError:
+        if not os.path.exists(path):
+            os.makedirs(path)
 
 
 def convert_to_tensorrt(model_store_dir, base_config, use_fp16=False):
@@ -73,7 +82,10 @@ def main(flags):
     input_dim = flags["clean_kernel"] * flags["fs"]
 
     # define a base config that has all the universal
-    # properties
+    # properties. TODO: add in metadata recording
+    # fs and kernel size (or really just one of them
+    # since we can always do some quick math to get
+    # the other from the input shape)
     base_config = model_config.ModelConfig(
         # max_batch_size=flags['batch_size'],
         input=[
