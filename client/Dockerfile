@@ -1,0 +1,15 @@
+
+ARG tag=20.07
+FROM nvcr.io/nvidia/pytorch:${tag}-py3
+ARG tag
+
+ENV CLIENT_DIR=/opt/tensorrtserver/client
+RUN mkdir -p ${CLIENT_DIR} && \
+      RELEASE=$(curl -s https://raw.githubusercontent.com/NVIDIA/triton-inference-server/r${tag}/VERSION) && \
+      wget -O ${CLIENT_DIR}/clients.tar.gz https://github.com/NVIDIA/triton-inference-server/releases/download/v${RELEASE}/v${RELEASE}_ubuntu1804.clients.tar.gz && \
+      cd ${CLIENT_DIR} && \
+      tar xzf clients.tar.gz && \
+      pip install --upgrade ${CLIENT_DIR}/python/tensorrtserver-*.whl
+
+ADD . deepclean_prod/
+RUN pip install --no-cache-dir deepclean_prod/
