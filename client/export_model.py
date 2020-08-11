@@ -17,7 +17,8 @@ def soft_makedirs(path):
     # basically just a reminder to myself to
     # get rid of this function and replace it
     # with the exist_ok syntax when I'm confident
-    # I have the right version
+    # I have the right version (os doesn't have
+    # a __version__ attribute unfortunately)
     try:
         os.makedirs(path, exist_ok=True)
     except TypeError:
@@ -128,6 +129,8 @@ def main(flags):
     #   for i in onnx_config.output:
     #     dynamic_axes[i.name] = {0: 'batch'}
 
+    # TODO: add in command line args for selecting which
+    # type of export to do, including an "all" option
     model = DeepClean(len(flags["chanslist"]))
     torch.onnx.export(
         model,

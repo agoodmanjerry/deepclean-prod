@@ -6,9 +6,10 @@ import time
 
 from gwpy.timeseries import TimeSeriesDict
 
-import grpc
-from tritongrpcclient import grpc_service_pb2
-from tritongrpcclient import grpc_service_pb2_grpc
+from tritongrpcclient import \
+    InferenceServerClient, InferenceServerException, \
+    InferInput, model_config_pb2
+from tritonclientutils import triton_to_np_dtype
 
 from deepclean_prod import config
 from . import parse_utils
@@ -21,7 +22,10 @@ def get_parser():
 
     # Dataset arguments
     # TODO: can we expose channel-wise inputs on the server side and
-    # do concatenation/windowing there as custom backend?
+    # do concatenation/windowing there as custom backend? Would prevent
+    # unnecessary data transfer. Possibly even do post processing there
+    # and just send back one sample that's at the center of the batch?
+    # Will depend on extent to which network time is bottlenecking
     parser.add_argument("--clean-t0", help="GPS of the first sample", type=int)
     parser.add_argument("--clean-duration", help="Duration of frame", type=int)
     parser.add_argument(
@@ -193,24 +197,54 @@ def post_process():
     pass
 
 
+def get_datatype(model_input):
+    data_type_name = model_config_pb2.DataType.Name(model.input.data_type)
+    return data_type_name.split("_", maxsplit=1)[1]
+
+
 def main(flags):
     # set up server connection and check that
     # server is active
-    channel = grpc.insecure_channel(flags["url"])
-    grpc_stub = grpc_service_pb2_grpc.GRPCInferenceServiceStub(channel)
-    try:
-        request = grpc_service_pb2.ServerLiveRequest()
-        response = grpc_stub.ServerLive(request)
-    except Exception as e:
-        raise RuntimeError("Server not live") from e
+    client = InferenceServerClient(flags["url"])
+    if not client.is_server_live()
+        raise RuntimeError("Server not live")
 
     # verify that model is ready
-    request = grpc_service_pb2.ModelReadyRequest(
-        name=flags["model_name"], version=flags["model_version"]
-    )
-    response = grpc_stub.ModelReady(request)
-    # TODO: some check on response
+    if not client.is_model_ready(flags["model_name"]):
+        try:
+            client.load_model(flags["model_name"])
 
+        # if we can't load the model, first check if it's
+        # even a valid name. If it is, throw our hands up
+        except InferenceServerException:
+            models = client.get_model_repository_index().models
+            model_names = [model.name for model in models]
+            if flags["model_name"] not in model_names:
+                raise ValueError(
+                    "Model name {} not one of available "
+                    "models: {}".format(
+                        flags["model_name"], ", ".join(model_names)
+                ))
+            else:
+                raise RuntimeError(
+                    "Couldn't load model {} for unknown reason".format(
+                        flags["model_name"]
+                ))
+    assert client.is_model_ready(flags["model_name"])
+    model_metadata = client.get_model_metadata(flags["model_name"])
+
+    # TODO: how to check version policy, or even load/unload
+    # specific versions?
+    assert model_metadata.versions[0] == flags["model_version"]
+
+    # initialize an input object that we'll set to different values
+    client_input = InferInput(
+        model_metadata.input[0].name,
+        (flags["batch_size"],) + tuple(model_metadata.input[0].dims),
+        get_datatype(model_metadata.input[0])
+    )
+
+    # start data generation process
     data_generator = DataGenerator(
         flags["chanslist"], flags["clean_t0"], flags["clean_duration"], flags["fs"]
     )
@@ -235,8 +269,12 @@ def main(flags):
         filt_order = ppr["filt_order"]
 
     sample_stride = flags["clean_stride"] * flags["fs"]
-    times = [time.time()]
-    X = np.empty((flags["batch_size"],) + input_tensor._data.shape, dtype=np.float32)
+
+    # initialize an empty numpy array that we'll fill with
+    # the values from our streaming tensor and then assign
+    # to our client input
+    dtype = triton_to_np_dtype(client_input.datatype())
+    X = np.empty(client_input.shape(), dtype=dtype)
     try:
         while True:
             # TODO: make this asynchronous in a separate
@@ -254,19 +292,18 @@ def main(flags):
                 x = (x - mean) / std
                 # TODO: see question about target channel
                 # x = bandpass(x, filt_fl, filt_fh, filt_order)
-                X[i] = x
-
-            inference_request = grpc_service_pb2.ModelInferRequest(
-                model_name=flags["model_name"],
-                model_version=flags["model_version"],
-                id="deepclean",
-            )
+                X[i] = x.astype(dtype)
 
             # TODO: infer input names by doing model
             # status request
-            input = grpc_service_pb2.ModelInferRequest().InferInputTensor()
-            infer_ctx.run(X)
-            times.append(time.time())
+            client_input.set_data_from_numpy(X)
+            triton_client.async_infer(
+                model_name=flags["model_name"],
+                model_version=flags["model_version"],
+                inputs=[client_input],
+                callback=postprocess
+            )
+
     except Exception as e:
         data_generator.stop()
         data_generator.join()
