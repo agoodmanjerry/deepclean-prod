@@ -3,6 +3,7 @@ import multiprocessing as mp
 import numpy as np
 import time
 from abc import abstractmethod
+from functools import partial
 
 from gwpy.timeseries import TimeSeriesDict
 
@@ -89,12 +90,23 @@ def get_parser():
     parser.add_argument("--log", help="Log file", type=str)
 
     # Server arguments
-    parser.add_argument("--url", help="Server url", default="localhost:8001", type=str)
     parser.add_argument(
-        "--model-name", help="Name of inference model", required=True, type=str
+        "--url",
+        help="Server url",
+        default="localhost:8001",
+        type=str
     )
     parser.add_argument(
-        "--model-version", help="Model version to use", default=1, type=int
+        "--model-name",
+        help="Name of inference model",
+        required=True,
+        type=str
+    )
+    parser.add_argument(
+        "--model-version",
+        help="Model version to use",
+        default=1,
+        type=int
     )
     # TODO: can we just get this from the input_shape until we
     # get dynamic batching working?
@@ -104,14 +116,80 @@ def get_parser():
         required=True,
         type=int,
     )
+
+    # viz plotting arguments
+    parser.add_argument(
+        "--output_dir",
+        help="Directory to write output files",
+        default="/bokeh",
+        type=str
+    )
+    parser.add_argument(
+        "--max_write_arrays",
+        help="Maximum number of (output, target) arrays to keep at once",
+        default=100,
+        type=int
+    )
+    parser.add_argument(
+        "--max_measurements",
+        help"Maximum number of latency/timestamp samples to keep at once",
+        default=1000,
+        type=int
+    )
     return parser
 
 
+class MaxablePipe:
+    '''
+    Cheap wrapper object to be able to leverage the speed of
+    pipes but while keeping loose track of how much data is
+    being put into queues. Just in case the data generation
+    process gets way ahead of the rest of the pipeline, this
+    can stop us from overloading the system memory
+    '''
+    def __init__(self, maxsize=None):
+        self.conn_in, self.conn_out = mp.Pipe(duplex=False)
+        self.maxsize = maxsize
+        self._size = 0
+
+    @property
+    def full(self):
+        self.size >= self.maxsize
+
+    def put(self, x, timeout=None):
+        start_time = time.time()
+        while self.full:
+            if timeout is not None:
+                if time.time() - start_time >= timeout:
+                    raise RuntimeError
+        self.conn_out.send(x)
+        self.size += 1
+
+    def get(self):
+        x = self.conn_in.recv()
+        self.size -= 1
+        return x
+
+    def close(self):
+        self.conn_in.close()
+        self.conn_out.close()
+
+
 class StoppableIteratingBuffer:
-    def __init__(self, conn_in=None, conn_out=None):
-        self.conn_in = conn_in
-        self.conn_out = conn_out
+    def __init__(self, pipe_in=None, pipe_out=None):
+        self.pipe_in = pipe_in
+        self.pipe_out = pipe_out
         self._stop_event = mp.Event()
+
+    def put(self, x, timeout=None):
+        if self.pipe_out is None:
+            raise ValueError("Nowhere to put!")
+        self.pipe_out.put(x, timeout)
+
+    def get(self):
+        if self.pipe_in is None:
+            raise ValueError("Nowhere to get!")
+        return self.pipe_in.get()
 
     @property
     def stopped(self):
@@ -125,13 +203,7 @@ class StoppableIteratingBuffer:
         while not self.stopped:
             self.loop()
 
-        # do some general cleanup
-        if self.conn_in is not None:
-            self.conn_in.close()
-        if self.conn_out is not None:
-            self.conn_out.close()
-
-        # allow for custom subclass cleanup as well
+        # allow for custom subclass cleanup
         self.cleanup()
 
     def initialize_loop(self):
@@ -159,7 +231,8 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
         # TODO: do something to account for finite generation
         # time?
         self.sleep_time = 1. / fs
-        self.channels = sorted(channels)
+        self.target_channel = channels[0]
+        self.channels = sorted(channels[1:])
         super().__init__(**kwargs)
 
     def initialize_loop(self):
@@ -171,8 +244,15 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
         for channel in self.channels:
             samples[channel] = self.data[channel][idx].value
 
-        # TODO: do some kind of timeout try-except here?
-        self.conn_out.send(samples)
+        # TODO: do thread-based write of target here so
+        # that it can be read by plotting process with
+        # "true" time lag?
+        target = samples[self.taget_channel][idx].value
+
+        # TODO: introduce some sort of check for length
+        # to avoid crashing memory?
+        generation_time = time.time()
+        self.put((samples, target, generation_time))
 
         # TODO: do some sort of padding rather than
         # just doing wrapping? Would this even be
@@ -222,11 +302,11 @@ class InputDataBuffer(StoppableIteratingBuffer):
         read individual samples and return an array of size
         `(len(self.channels), 1)` for hstacking
         '''
-        samples = self.conn_in.recv()
-        return np.array(
+        samples, target, gen_time = self.get()
+        return (np.array(
             [[samples[channel]] for channel in self.channels],
             dtype=np.float32 # TODO: use dtype from model metadata
-        )
+        ), target)
 
     def preprocess(self, data):
         '''
@@ -254,18 +334,20 @@ class InputDataBuffer(StoppableIteratingBuffer):
         # start by reading the next batch of samples
         # TODO: play with numpy to see what's most efficient
         # concat and reshape? read_sensor()[:, None]?
-        data = []
+        data, target = [], []
         for i in range(self.num_samples):
-            data.append(read_sensor())
+            x, y, gen_time = read_sensor()
+            if i == 0:
+                batch_gen_time = gen_time
+            data.append(x)
+            target.append(y)
+
         data = np.hstack(data)
+        target = np.concatenate(target)
     
         data = self.preprocess(data)
         data = self.batch(data)
-        self.conn_out.send(data)
-
-    def cleanup(self):
-        self.conn_in.close()
-        self.conn_out.close()
+        self.put((data, target, batch_gen_time))
 
 
 class AsyncInferenceClient(StoppableIteratingBuffer):
@@ -318,20 +400,23 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def loop(self):
-        X = self.conn_in.recv()
+        X, y, batch_gen_time = self.get()
+        callback=partial(
+            self.process_result, target=y, batch_gen_time=batch_gen_time)
+    
         self.client_input.set_data_from_numpy(X)
         self.client.async_infer(
             model_name=self.model_name,
             model_version=self.model_version,
             inputs=[self.client_input],
             outputs=[self.client_output]
-            callback=self.process_result
+            callback=callback
         )
     
-    def process_result(self, result, error):
+    def process_result(self, target, batch_gen_time, result, error):
         # TODO: add error checking
         data = result.as_numpy(self.client_output.name())
-        self.conn_out.send(data)
+        self.put((data, target, batch_gen_time))
 
 
 class PostProcessBuffer(StoppableIteratingBuffer):
@@ -348,34 +433,75 @@ class PostProcessBuffer(StoppableIteratingBuffer):
 
         super().__init__(**kwargs)
 
+    def initialize_loop(self):
+        self.start_time = time.time()
+
     def loop(self):
-        data = self.conn_in.recv()
+        data, target, batch_gen_time = self.get()
         data = self.std*data + self.mean
 
         # TODO: add overlap calculation, maybe keep track of streaming
         # output tensor to capture overlap from predictions that
         # weren't in this batch?
         data = bandpass(data, self.filt_fl, self.filt_fh, self.filt_order)
+        processed_time = time.time()
 
-        # TODO: keep track of running throughput average, find a way
-        # to capture latency (maybe by reference to data_generator.idx)?
-        # stream throughput data somewhere
+        # TODO: May need to account for the finite amount of
+        # time this takes if `conn_in.recv` is never waiting
+        batch_latency = int((processed_time - batch_gen_time)*10**6)
+
+        # send everything to some writer to pass to e.g. viz app
+        self.put((data, target, batch_latency, processed_time))
 
 
 def main(flags):
-    raw_data_in, raw_data_out = mp.Pipe(duplex=False)
-    preproc_data_in, preproc_data_out = mp.Pipe(duplex=False)
-    infer_result_in, infer_result_out = mp.Pipe(duplex=False)
+    # set up output directory
+    if not os.path.exists(flags["output_dir"])
+        os.makedirs(flags["output_dir"])
+    run_name = flags["model_name"] + "-batch_size_" + str(flags["batch_size"])
+    output_dir = os.path.join(flags["output_dir"], run_name)
 
+    # TODO: do we need any others?
+    for subdir in ["arrays"]:
+        subdir = os.path.join(output_dir, subdir)
+        if not os.path.exists(subdir):
+            os.makedirs(subdir)
+        elif len(os.listdir(subdir)) > 0:
+            for fname in os.listdir(subdir):
+                os.remove(os.path.join(subdir, fname))
+
+    # build all the pipes between processes
+    # TODO: how will max pipe size affect latency measurements?
+    num_samples_per_batch = (
+        (flags["clean_stride"]*flags["batch_size"] + flags["clean_kernel"])*
+        flags["fs"]
+    )
+    max_num_batches = 5
+
+    raw_data_pipe = MaxablePipe(maxsize=max_num_batches*num_samples_per_batch)
+    preproc_pipe = MaxablePipe(maxsize=max_num_batches)
+    infer_pipe = MaxablePipe(maxsize=max_num_batches)
+    results_pipe = MaxablePipe(maxsize=max_num_batches)
+
+    # pass pipes to iterating buffers to create separate processes
+    # for each step in the pipeline. We'll do viz writing in
+    # the main process (here)
+
+    # start with data generation process. This is meant to simulate
+    # the functionality of the actual sensors from which data will
+    # be read, and so wouldn't be used in a real pipeline
     raw_data_buffer = DataGeneratorBuffer(
         flags["chanslist"],
         flags["clean_t0"],
         flags["clean_duration"],
         flags["fs"],
-        conn_out=raw_data_out
+        pipe_out=raw_data_pipe
     )
     data_generator = mp.Process(target=raw_data_buffer)
 
+    # asynchronously read samples from data generation process,
+    # accumulate a batch's worth, apply preprocessing, then
+    # window chunks into a batch
     preprocess_buffer = InputDataBuffer(
         flags["batch_size"],
         flags["chanslist"],
@@ -383,23 +509,29 @@ def main(flags):
         flags["clean_stride"],
         flags["fs"],
         ppr_file=flags["ppr_file"],
-        conn_in=raw_data_in,
-        conn_out=preproc_data_out
+        pipe_in=raw_data_pipe,
+        pipe_out=preproc_pipe
     )
     preprocessor = mp.Process(target=preprocess_buffer)
 
+    # asynchronously read preprocessed data and submit to
+    # triton for model inference
     client_buffer = AsyncInferenceClient(
         flags["url"],
         flags["model_name"],
         str(flags["model_version"]),
-        conn_in=preproc_data_in,
-        conn_out=infer_result_out
+        pipe_in=preproc_pipe,
+        pipe_out=infer_pipe
     )
     client = mp.Process(target=client_buffer)
 
+    # asynchronously receive outputs from triton and
+    # apply postprocessing (denormalizing, bandpass
+    # filtering, accumulating across windows)
     postprocess_buffer = PostProcessBuffer(
         flags["ppr_file"],
-        conn_in=infer_result_out
+        pipe_=infer_pipe,
+        pipe_out=results_pipe
     )
     postprocessor = mp.Process(target=postprocess_buffer)
 
@@ -417,12 +549,47 @@ def main(flags):
     try:
         for process in processes:
             process.start()
+
+        # TODO: instead of files here, should we use
+        # mp.connection.Listener and set up a client on
+        # the other end?
+
+        # write latency measurements to csv, name it with
+        # start time so that we can calculate throughput
+        # measurements on the read side however we like
+        csv_rows = ["latency,timestamp"]
+        csv_filename = "measurements-" + str(int(time.time()*10**6)) + ".csv"
         while True:
-            # TODO: add something here that streams data
-            # to a bokeh app or something for visualization,
-            # or maybe even add a server process that listens
-            # for updates to the model
-            continue
+            data, target, latency, tstamp = results_writer_in.recv()
+            tstamp = str(int(tstamp*10**6))
+
+            # TODO: add checks to avoid writing to files opened
+            # by other processes, particularly for the measurement
+            # csv write
+
+            # save out the prediction and the target to a numpy array
+            # Create some slack for a reader process to be behind,
+            # but cap at some maximum number of files and name them
+            # according to us timestamp to know which ones are old and
+            # can be deleted
+            arr = np.stack([data, target])
+            array_fnames = sorted(os.listdir(os.path.join(output_dir, "arrays")))
+            if len(array_fnames) > flags["max_write_arrays"]:
+                # delete the earliest files
+                os.remove(os.path.join(output_dir, "arrays", array_fnames[0]))
+            np.save(os.path.join(output_dir, "arrays", tstamp), arr)
+
+            # TODO: does it make more sense to do an append here
+            # and leave the job of deleting stuff to the reading
+            # process? Seems unsafe if the reading process dies
+            # or something
+            row = f"{latency},{timestamp}"
+            if len(csv_rows) >= flags["max_measurements"]:
+                del csv_rows[1]
+            csv_rows.append(row)
+            csv_string = "\n".join(csv_rows)
+            with open(os.path.join(output_dir, csv_filename), "w") as f:
+                f.write(csv_string)
 
     except Exception as e:
         for process in processes:
