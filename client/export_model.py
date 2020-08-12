@@ -164,7 +164,7 @@ if __name__ == "__main__":
         help="Number of input channels",
     )
     parser.add_argument(
-        "--clean_kernel",
+        "--clean-kernel",
         type=float,
         default=config.DEFAULT_CLEAN_KERNEL,
         help="Length of each segment in seconds",
@@ -176,10 +176,13 @@ if __name__ == "__main__":
         help="Sampling frequency",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8, help="Batch size to export with"
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Batch size to export with"
     )
     parser.add_argument(
-        "--model_store_dir",
+        "--model-store-dir",
         type=str,
         default="modelstore",
         help="Path to root model store directory",

@@ -94,12 +94,12 @@ def get_parser():
         "--model-name", help="Name of inference model", required=True, type=str
     )
     parser.add_argument(
-        "--model-version", help="Model version to use", default=0, type=int
+        "--model-version", help="Model version to use", default=1, type=int
     )
     # TODO: can we just get this from the input_shape until we
     # get dynamic batching working?
     parser.add_argument(
-        "--batch_size",
+        "--batch-size",
         help="Number of windows to infer on at once",
         required=True,
         type=int,
@@ -369,8 +369,8 @@ def main(flags):
 
     raw_data_buffer = DataGeneratorBuffer(
         flags["chanslist"],
-        flags["clean-t0"],
-        flags["clean-duration"],
+        flags["clean_t0"],
+        flags["clean_duration"],
         flags["fs"],
         conn_out=raw_data_out
     )
@@ -379,10 +379,10 @@ def main(flags):
     preprocess_buffer = InputDataBuffer(
         flags["batch_size"],
         flags["chanslist"],
-        flags["clean-kernel"],
-        flags["clean-stride"],
+        flags["clean_kernel"],
+        flags["clean_stride"],
         flags["fs"],
-        ppr_file=flags["ppr-file"],
+        ppr_file=flags["ppr_file"],
         conn_in=raw_data_in,
         conn_out=preproc_data_out
     )
@@ -391,7 +391,7 @@ def main(flags):
     client_buffer = AsyncInferenceClient(
         flags["url"],
         flags["model_name"],
-        flags["model_version"],
+        str(flags["model_version"]),
         conn_in=preproc_data_in,
         conn_out=infer_result_out
     )
