@@ -237,9 +237,18 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
 
     def initialize_loop(self):
         self.idx = 0
+        self.start_time = time.time()
+
+    @property
+    def generator_time(self):
+        '''
+        associate each sample with a time in real time that it
+        "should" have been sampled given the start time,
+        sample rate, and current_index
+        '''
+        return self.start_time + self.idx*self.sleep_time
 
     def loop(self):
-        time.sleep(self.sleep_time)
         samples = {}
         for channel in self.channels:
             samples[channel] = self.data[channel][idx].value
@@ -249,16 +258,16 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
         # "true" time lag?
         target = samples[self.taget_channel][idx].value
 
-        # TODO: introduce some sort of check for length
-        # to avoid crashing memory?
-        generation_time = time.time()
+        generation_time = self.generator_time
         self.put((samples, target, generation_time))
 
         # TODO: do some sort of padding rather than
         # just doing wrapping? Would this even be
         # handled here?
         self.idx += 1
-        self.idx %= len(self.data[channel])
+        if self.idx == len(self.data[channel]):
+            self.start_time += self.idx*self.sleep_time
+            self.idx = 0
 
 
 class InputDataBuffer(StoppableIteratingBuffer):
@@ -303,10 +312,15 @@ class InputDataBuffer(StoppableIteratingBuffer):
         `(len(self.channels), 1)` for hstacking
         '''
         samples, target, gen_time = self.get()
-        return (np.array(
-            [[samples[channel]] for channel in self.channels],
-            dtype=np.float32 # TODO: use dtype from model metadata
-        ), target)
+
+        # make sure that we don't "peek" ahead at
+        # data that isn't supposed to exist yet
+        while time.time() < gen_time:
+            continue
+
+        samples = [[samples[channel]] for channel in self.channels]
+        x = np.array(samples, dtype=np.float32)
+        return x, target
 
     def preprocess(self, data):
         '''
@@ -433,9 +447,6 @@ class PostProcessBuffer(StoppableIteratingBuffer):
 
         super().__init__(**kwargs)
 
-    def initialize_loop(self):
-        self.start_time = time.time()
-
     def loop(self):
         data, target, batch_gen_time = self.get()
         data = self.std*data + self.mean
@@ -473,10 +484,10 @@ def main(flags):
     # build all the pipes between processes
     # TODO: how will max pipe size affect latency measurements?
     num_samples_per_batch = (
-        (flags["clean_stride"]*flags["batch_size"] + flags["clean_kernel"])*
+        (flags["clean_stride"]*(flags["batch_size"]-1) + flags["clean_kernel"])*
         flags["fs"]
     )
-    max_num_batches = 5
+    max_num_batches = 1000
 
     raw_data_pipe = MaxablePipe(maxsize=max_num_batches*num_samples_per_batch)
     preproc_pipe = MaxablePipe(maxsize=max_num_batches)
@@ -504,7 +515,7 @@ def main(flags):
     # window chunks into a batch
     preprocess_buffer = InputDataBuffer(
         flags["batch_size"],
-        flags["chanslist"],
+        flags["chanslist"][1:],
         flags["clean_kernel"],
         flags["clean_stride"],
         flags["fs"],
@@ -557,11 +568,35 @@ def main(flags):
         # write latency measurements to csv, name it with
         # start time so that we can calculate throughput
         # measurements on the read side however we like
+        start_time = time.time()
+        i = 0
+        lazy_average_latency = 0
+        lazy_average_rmse = 0
+
         csv_rows = ["latency,timestamp"]
-        csv_filename = "measurements-" + str(int(time.time()*10**6)) + ".csv"
+        csv_filename = "measurements-" + str(int(start_time*10**6)) + ".csv"
+        print("Running demo...")
         while True:
-            data, target, latency, tstamp = results_writer_in.recv()
-            tstamp = str(int(tstamp*10**6))
+            data, target, latency, tstamp = results_pipe.get()
+            # tstamp = str(int(tstamp*10**6))
+
+            # commenting the file writing out until I figure out viz
+            # and I/O issues. Just going to print running throughput for now
+            i += 1
+            elapsed_time = tstamp - start_time
+            lazy_throughput = (i*flags["batch_size"]) / elapsed_time
+            lazy_average_latency = (i-1)*lazy_average_latency / i + latency / i
+
+            rmse = ((data - target)**2).mean()**(0.5)
+            lazy_average_rmse = (i-1)*lazy_average_rmse / i + rmse / i
+    
+            msg = "\rThroughput: {} samples/second, Latency: {} us, RMSE: {:0.3f}"
+            msg.format(
+                int(lazy_throughput),
+                int(lazy_average_latency*10**6),
+                rmse
+            )
+            print(msg, end="")
 
             # TODO: add checks to avoid writing to files opened
             # by other processes, particularly for the measurement
@@ -572,24 +607,24 @@ def main(flags):
             # but cap at some maximum number of files and name them
             # according to us timestamp to know which ones are old and
             # can be deleted
-            arr = np.stack([data, target])
-            array_fnames = sorted(os.listdir(os.path.join(output_dir, "arrays")))
-            if len(array_fnames) > flags["max_write_arrays"]:
-                # delete the earliest files
-                os.remove(os.path.join(output_dir, "arrays", array_fnames[0]))
-            np.save(os.path.join(output_dir, "arrays", tstamp), arr)
+            # arr = np.stack([data, target])
+            # array_fnames = sorted(os.listdir(os.path.join(output_dir, "arrays")))
+            # if len(array_fnames) > flags["max_write_arrays"]:
+            #     # delete the earliest files
+            #     os.remove(os.path.join(output_dir, "arrays", array_fnames[0]))
+            # np.save(os.path.join(output_dir, "arrays", tstamp), arr)
 
-            # TODO: does it make more sense to do an append here
-            # and leave the job of deleting stuff to the reading
-            # process? Seems unsafe if the reading process dies
-            # or something
-            row = f"{latency},{timestamp}"
-            if len(csv_rows) >= flags["max_measurements"]:
-                del csv_rows[1]
-            csv_rows.append(row)
-            csv_string = "\n".join(csv_rows)
-            with open(os.path.join(output_dir, csv_filename), "w") as f:
-                f.write(csv_string)
+            # # TODO: does it make more sense to do an append here
+            # # and leave the job of deleting stuff to the reading
+            # # process? Seems unsafe if the reading process dies
+            # # or something
+            # row = f"{latency},{timestamp}"
+            # if len(csv_rows) >= flags["max_measurements"]:
+            #     del csv_rows[1]
+            # csv_rows.append(row)
+            # csv_string = "\n".join(csv_rows)
+            # with open(os.path.join(output_dir, csv_filename), "w") as f:
+            #     f.write(csv_string)
 
     except Exception as e:
         for process in processes:
