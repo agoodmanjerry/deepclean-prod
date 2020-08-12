@@ -154,7 +154,7 @@ class MaxablePipe:
 
     @property
     def full(self):
-        self.size >= self.maxsize
+        self._size >= self.maxsize
 
     def put(self, x, timeout=None):
         start_time = time.time()
@@ -163,11 +163,11 @@ class MaxablePipe:
                 if time.time() - start_time >= timeout:
                     raise RuntimeError
         self.conn_out.send(x)
-        self.size += 1
+        self._size += 1
 
     def get(self):
         x = self.conn_in.recv()
-        self.size -= 1
+        self._size -= 1
         return x
 
     def close(self):
@@ -251,12 +251,12 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
     def loop(self):
         samples = {}
         for channel in self.channels:
-            samples[channel] = self.data[channel][idx].value
+            samples[channel] = self.data[channel][self.idx].value
 
         # TODO: do thread-based write of target here so
         # that it can be read by plotting process with
         # "true" time lag?
-        target = samples[self.taget_channel][idx].value
+        target = self.data[self.target_channel][self.idx].value
 
         generation_time = self.generator_time
         self.put((samples, target, generation_time))
@@ -286,8 +286,8 @@ class InputDataBuffer(StoppableIteratingBuffer):
         # tells us how to window a 2D stream of data into a 3D batch
         slices = []
         for i in range(batch_size):
-            start = i*kernel_stride*fs
-            stop = start + kernel_size*fs
+            start = int(i*kernel_stride*fs)
+            stop = int(start + kernel_size*fs)
             slices.append(slice(start, stop))
         self.slices = slices
 
@@ -320,7 +320,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
         samples = [[samples[channel]] for channel in self.channels]
         x = np.array(samples, dtype=np.float32)
-        return x, target
+        return x, target, gen_time
 
     def preprocess(self, data):
         '''
@@ -342,7 +342,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
         '''
         take windows of data at strided intervals and stack them
         '''
-        return np.hstack([data[:, slc] for slc in self.slices])
+        return np.stack([data[:, slc] for slc in self.slices])
 
     def loop(self):
         # start by reading the next batch of samples
@@ -357,7 +357,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
             target.append(y)
 
         data = np.hstack(data)
-        target = np.concatenate(target)
+        target = np.array(target)
     
         data = self.preprocess(data)
         data = self.batch(data)
@@ -541,7 +541,7 @@ def main(flags):
     # filtering, accumulating across windows)
     postprocess_buffer = PostProcessBuffer(
         flags["ppr_file"],
-        pipe_=infer_pipe,
+        pipe_in=infer_pipe,
         pipe_out=results_pipe
     )
     postprocessor = mp.Process(target=postprocess_buffer)
@@ -551,6 +551,12 @@ def main(flags):
         preprocessor,
         client,
         postprocessor
+    ]
+    pipes = [
+        raw_data_pipe,
+        preproc_pipe,
+        infer_pipe,
+        results_pipe
     ]
 
     # start all of our processes inside try/except
@@ -631,6 +637,8 @@ def main(flags):
             if process.is_alive():
                 process.stop()
                 process.join()
+        for pipe in pipes:
+            pipe.close()
         raise e
 
 
