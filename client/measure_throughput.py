@@ -1,20 +1,21 @@
 import os
-from threading import Thread, Event
-from queue import Queue, Empty
+import multiprocessing as mp
 import numpy as np
 import time
+from abc import abstractmethod
 
 from gwpy.timeseries import TimeSeriesDict
 
-from tritongrpcclient import \
-    InferenceServerClient, InferenceServerException, \
-    InferInput, model_config_pb2
+import tritongrpcclient as triton
+from tritongrpcclient import model_config_pb2 as model_config
 from tritonclientutils import triton_to_np_dtype
 
 from deepclean_prod import config
+from deepclean_prod.signal import bandpass
 from . import parse_utils
 
 
+# TODO: move somewhere else
 def get_parser():
     parser = argparse.ArgumentParser(
         prog=os.path.basename(__file__), usage="%(prog)s [options]"
@@ -26,8 +27,18 @@ def get_parser():
     # unnecessary data transfer. Possibly even do post processing there
     # and just send back one sample that's at the center of the batch?
     # Will depend on extent to which network time is bottlenecking
-    parser.add_argument("--clean-t0", help="GPS of the first sample", type=int)
-    parser.add_argument("--clean-duration", help="Duration of frame", type=int)
+    parser.add_argument(
+        "--clean-t0",
+        help="GPS of the first sample",
+        type=int,
+        required=True,
+    )
+    parser.add_argument(
+        "--clean-duration",
+        help="Duration of frame",
+        type=int,
+        required=True
+    )
     parser.add_argument(
         "--chanslist",
         help="Path to channel list",
@@ -58,7 +69,10 @@ def get_parser():
         type=float,
     )
     parser.add_argument(
-        "--pad-mode", help="Padding mode", default=config.DEFAULT_PAD_MODE, type=str
+        "--pad-mode",
+        help="Padding mode",
+        default=config.DEFAULT_PAD_MODE,
+        type=str
     )
 
     # Post-processing arguments
@@ -93,220 +107,328 @@ def get_parser():
     return parser
 
 
-# TODO: can this just be achieved with a generator
-# function passed as `target` with the args passed
-# to `args`? Not clear how to kill that
-# Possibly buffer class that has q object and an
-# __iter__ method?
-# TODO: see todo above StreamingInputTensor about
-# implementing as a Process with a Pipe connection
-# out from here to the StreamingInputTensor
-class DataGenerator(Thread):
-    def __init__(self, channels, t0, duration, fs, qsize=100):  # TODO: add as cl arg
-        # If chanslist is supplied as a list, I'm assuming you've
-        # already removed the target channel from it. Otherwise,
-        # I'll assume the target channel is the first (0th) element
-        # in a chanslist file
-        if isinstance(channels, str):
-            with open(channels, "r") as f:
-                channels = f.read().split("\n")[1:]
-
-        self.data = TimeSeriesDict.fetch(
-            channels, t0, t0 + duration, nproc=4, allow_tape=True
-        )
-        self.data.resample(fs)
-        self.sleep_time = 1.0 / fs
-        self.channels = sorted(channels)
-
-        self.q = Queue(maxsize=qsize)
-        self._stop_event = Event()
-
-        super(DataGenerator, self).__init__(**kwargs)
-
-    def stop(self):
-        self._stop_event.set()
+class StoppableIteratingBuffer:
+    def __init__(self, conn_in=None, conn_out=None):
+        self.conn_in = conn_in
+        self.conn_out = conn_out
+        self._stop_event = mp.Event()
 
     @property
     def stopped(self):
         return self._stop_event.is_set()
 
-    def run(self):
-        idx = 0
+    def stop(self):
+        self._stop_event.set()
+
+    def __call__(self):
+        self.initialize_loop()
         while not self.stopped:
-            # TODO: account for the finite time
-            # the data generation takes
-            time.sleep(self.sleep_time)
-            samples = {}
-            for channel in self.channels:
-                samples[channel] = self.data[channel][idx].value
+            self.loop()
 
-            # TODO: do some kind of timeout try-except here?
-            self.q.put(samples)
+        # do some general cleanup
+        if self.conn_in is not None:
+            self.conn_in.close()
+        if self.conn_out is not None:
+            self.conn_out.close()
 
-            # TODO: do some sort of padding rather than
-            # just doing wrapping? Would this even be
-            # handled here?
-            idx += 1
-            idx %= len(self.data[channel])
+        # allow for custom subclass cleanup as well
+        self.cleanup()
 
-        self.q.queue.clear()
+    def initialize_loop(self):
+        pass
 
-    def get(self, timeout=None):
-        try:
-            return self.q.get(timeout=timeout)
-        except Empty:
-            return None
+    @abstractmethod
+    def loop(self):
+        '''
+        required to have this method for main funcionality
+        '''
+        pass
+
+    def cleanup(self):
+        pass
 
 
-# TODO: implement as separate Process with two Pipe
-# connections, one coming in from data generator,
-# the other going out to main process. Handle
-# preproc here
-class StreamingInputTensor:
-    def __init__(self, chanslist, fs, kernel_length):
-        if isinstance(channels, str):
-            with open(channels, "r") as f:
-                channels = f.read().split("\n")[1:]
+class DataGeneratorBuffer(StoppableIteratingBuffer):
+    # TODO: better to use queue for max size?
+    def __init__(self, channels, t0, duration, fs, **kwargs):
+        self.data = TimeSeriesDict.fetch(
+            channels, t0, t0 + duration, nproc=4, allow_tape=True
+        )
+        self.data.resample(fs)
+
+        # TODO: do something to account for finite generation
+        # time?
+        self.sleep_time = 1. / fs
         self.channels = sorted(channels)
-        self.dim1 = int(kernel_length * fs)
-        self._data = np.array([[0.0] for _ in channels], dtype=np.float32)
+        super().__init__(**kwargs)
 
-    @property
-    def valid(self):
-        return self._data.shape[1] == self.dim1
+    def initialize_loop(self):
+        self.idx = 0
 
-    def update(self, samples):
-        sample = np.array([[samples[channel] for channel in self.channels]]).T
-        self._data = np.concatenate([self._data, sample])
-        if self._data.shape[1] > self.dim1:
-            # TODO: should never be more than 1 but let's
-            # be general to be safe
-            overflow = self._data.shape[1] - self.dim1
-            self._data = self._data[:, overflow:]
+    def loop(self):
+        time.sleep(self.sleep_time)
+        samples = {}
+        for channel in self.channels:
+            samples[channel] = self.data[channel][idx].value
 
-    @property
-    def value(self):
-        return self._data.copy()
+        # TODO: do some kind of timeout try-except here?
+        self.conn_out.send(samples)
 
-
-def infer():
-    pass
+        # TODO: do some sort of padding rather than
+        # just doing wrapping? Would this even be
+        # handled here?
+        self.idx += 1
+        self.idx %= len(self.data[channel])
 
 
-def post_process():
-    pass
+class InputDataBuffer(StoppableIteratingBuffer):
+    def __init__(self,
+            batch_size,
+            channels,
+            kernel_size,
+            kernel_stride,
+            fs,
+            ppr_file=None,
+            **kwargs
+    ):
+        # total number of samples in a single batch
+        self.num_samples = (kernel_stride*(batch_size-1) + kernel_size)*fs
+
+        # tells us how to window a 2D stream of data into a 3D batch
+        slices = []
+        for i in range(batch_size):
+            start = i*kernel_stride*fs
+            stop = start + kernel_size*fs
+            slices.append(slice(start, stop))
+        self.slices = slices
+
+        self.channels = sorted(channels)
+
+        # load preprocessing info if there is any
+        # since we only do bandpass on the target, I'll
+        # ignore those params for now
+        if ppr_file is not None:
+            with open(ppr_file, "rb") as f:
+                ppr = pickle.load(f)
+                self.mean = ppr["mean"]
+                self.std = ppr["std"]
+        else:
+            self.mean, self.std = None, None
+
+        super().__init__(**kwargs)
+
+    def read_sensor(self):
+        '''
+        read individual samples and return an array of size
+        `(len(self.channels), 1)` for hstacking
+        '''
+        samples = self.conn_in.recv()
+        return np.array(
+            [[samples[channel]] for channel in self.channels],
+            dtype=np.float32 # TODO: use dtype from model metadata
+        )
+
+    def preprocess(self, data):
+        '''
+        perform any preprocessing transformations on the data
+        just does normalization for now
+        '''
+        # TODO: is there any extra preprocessing that should
+        # be done? With small enough strides and batch sizes,
+        # does there reach a point at which it makes sense
+        # to do preproc on individual samples (assuming it
+        # can be done that locally) to avoid doing thousands
+        # of times on the same sample? Where is this limit?
+        if self.mean is not None:
+            return (data - self.mean) / self.std
+        else:
+            return data
+
+    def batch(self, data):
+        '''
+        take windows of data at strided intervals and stack them
+        '''
+        return np.hstack([data[:, slc] for slc in self.slices])
+
+    def loop(self):
+        # start by reading the next batch of samples
+        # TODO: play with numpy to see what's most efficient
+        # concat and reshape? read_sensor()[:, None]?
+        data = []
+        for i in range(self.num_samples):
+            data.append(read_sensor())
+        data = np.hstack(data)
+    
+        data = self.preprocess(data)
+        data = self.batch(data)
+        self.conn_out.send(data)
+
+    def cleanup(self):
+        self.conn_in.close()
+        self.conn_out.close()
 
 
-def get_datatype(model_input):
-    data_type_name = model_config_pb2.DataType.Name(model.input.data_type)
-    return data_type_name.split("_", maxsplit=1)[1]
+class AsyncInferenceClient(StoppableIteratingBuffer):
+    def __init__(self, url, model_name, model_version, **kwargs):
+        # set up server connection and check that server is active
+        client = triton.InferenceServerClient(url)
+        if not client.is_server_live():
+            raise RuntimeError("Server not live")
+
+        # verify that model is ready
+        if not client.is_model_ready(model_name):
+            # if not, try to load use model control API
+            try:
+                client.load_model(model_name)
+
+            # if we can't load the model, first check if the given
+            # name is even valid. If it is, throw our hands up
+            except triton.InferenceServerException:
+                models = client.get_model_repository_index().models
+                model_names = [model.name for model in models]
+                if model_name not in model_names:
+                    raise ValueError(
+                        "Model name {} not one of available models: {}".format(
+                            model_name, ", ".join(model_names))
+                    )
+                else:
+                    raise RuntimeError(
+                        "Couldn't load model {} for unknown reason".format(
+                            model_name)
+                    )
+            # double check that load worked
+            assert client.is_model_ready(model_name)
+
+        metadata = client.get_model_metadata(model_name)
+        # TODO: find better way to check version, or even to
+        # load specific version
+        assert model_metadata.versions[0] == model_version
+
+        model_input = model_metadata.input[0]
+        data_type_name = model_config.DataType.Name(model_input.data_type)
+        data_type = data_type_name.split("_", maxsplit=1)[1]
+
+        model_output = model_metadata.ouptut[0]
+
+        self.client_input = triton.InferInput(
+            model_input.name, tuple(model_input.dims), data_type
+        )
+        self.client_output = triton.InferRequestedOutput(model_output.name)
+        self.client = client
+        super().__init__(**kwargs)
+
+    def loop(self):
+        X = self.conn_in.recv()
+        self.client_input.set_data_from_numpy(X)
+        self.client.async_infer(
+            model_name=self.model_name,
+            model_version=self.model_version,
+            inputs=[self.client_input],
+            outputs=[self.client_output]
+            callback=self.process_result
+        )
+    
+    def process_result(self, result, error):
+        # TODO: add error checking
+        data = result.as_numpy(self.client_output.name())
+        self.conn_out.send(data)
+
+
+class PostProcessBuffer(StoppableIteratingBuffer):
+    def __init__(self, ppr_file, **kwargs):
+        # TODO: should we do a check on the mean and std like we
+        # do during preprocessing?
+        with open(ppr_file, "rb") as f:
+            ppr = pickle.load(f)
+            self.mean = ppr["mean"]
+            self.std = ppr["std"]
+            self.filt_fl = ppr['filt_fl']
+            self.filt_fh = ppr['filt_fh']
+            self.filt_order = ppr['filt_order']
+
+        super().__init__(**kwargs)
+
+    def loop(self):
+        data = self.conn_in.recv()
+        data = self.std*data + self.mean
+
+        # TODO: add overlap calculation, maybe keep track of streaming
+        # output tensor to capture overlap from predictions that
+        # weren't in this batch?
+        data = bandpass(data, self.filt_fl, self.filt_fh, self.filt_order)
+
+        # TODO: keep track of running throughput average, find a way
+        # to capture latency (maybe by reference to data_generator.idx)?
+        # stream throughput data somewhere
 
 
 def main(flags):
-    # set up server connection and check that
-    # server is active
-    client = InferenceServerClient(flags["url"])
-    if not client.is_server_live()
-        raise RuntimeError("Server not live")
+    raw_data_in, raw_data_out = mp.Pipe(duplex=False)
+    preproc_data_in, preproc_data_out = mp.Pipe(duplex=False)
+    infer_result_in, infer_result_out = mp.Pipe(duplex=False)
 
-    # verify that model is ready
-    if not client.is_model_ready(flags["model_name"]):
-        try:
-            client.load_model(flags["model_name"])
-
-        # if we can't load the model, first check if it's
-        # even a valid name. If it is, throw our hands up
-        except InferenceServerException:
-            models = client.get_model_repository_index().models
-            model_names = [model.name for model in models]
-            if flags["model_name"] not in model_names:
-                raise ValueError(
-                    "Model name {} not one of available "
-                    "models: {}".format(
-                        flags["model_name"], ", ".join(model_names)
-                ))
-            else:
-                raise RuntimeError(
-                    "Couldn't load model {} for unknown reason".format(
-                        flags["model_name"]
-                ))
-    assert client.is_model_ready(flags["model_name"])
-    model_metadata = client.get_model_metadata(flags["model_name"])
-
-    # TODO: how to check version policy, or even load/unload
-    # specific versions?
-    assert model_metadata.versions[0] == flags["model_version"]
-
-    # initialize an input object that we'll set to different values
-    client_input = InferInput(
-        model_metadata.input[0].name,
-        (flags["batch_size"],) + tuple(model_metadata.input[0].dims),
-        get_datatype(model_metadata.input[0])
+    raw_data_buffer = DataGeneratorBuffer(
+        flags["chanslist"],
+        flags["clean-t0"],
+        flags["clean-duration"],
+        flags["fs"],
+        conn_out=raw_data_out
     )
+    data_generator = mp.Process(target=raw_data_buffer)
 
-    # start data generation process
-    data_generator = DataGenerator(
-        flags["chanslist"], flags["clean_t0"], flags["clean_duration"], flags["fs"]
+    preprocess_buffer = InputDataBuffer(
+        flags["batch_size"],
+        flags["chanslist"],
+        flags["clean-kernel"],
+        flags["clean-stride"],
+        flags["fs"],
+        ppr_file=flags["ppr-file"],
+        conn_in=raw_data_in,
+        conn_out=preproc_data_out
     )
-    data_generator.start()
+    preprocessor = mp.Process(target=preprocess_buffer)
 
-    # instantiate and initialize data in streaming
-    # input tensor
-    input_tensor = StreamingInputTensor(
-        flags["chanslist"], flags["fs"], flags["kernel_length"]
+    client_buffer = AsyncInferenceClient(
+        flags["url"],
+        flags["model_name"],
+        flags["model_version"],
+        conn_in=preproc_data_in,
+        conn_out=infer_result_out
     )
-    while not input_tensor.valid:
-        sample = data_generator.get()
-        input_tensor.update(sample)
+    client = mp.Process(target=client_buffer)
 
-    with open(flags["ppr_file"], "rb") as f:
-        ppr = pickle.load(f)
-        mean = ppr["mean"]
-        std = ppr["std"]
-        # TODO: is this only for the target channel?
-        filt_fl = ppr["filt_fl"]
-        filt_fh = ppr["filt_fh"]
-        filt_order = ppr["filt_order"]
+    postprocess_buffer = PostProcessBuffer(
+        flags["ppr_file"],
+        conn_in=infer_result_out
+    )
+    postprocessor = mp.Process(target=postprocess_buffer)
 
-    sample_stride = flags["clean_stride"] * flags["fs"]
+    processes = [
+        data_generator,
+        preprocessor,
+        client,
+        postprocessor
+    ]
 
-    # initialize an empty numpy array that we'll fill with
-    # the values from our streaming tensor and then assign
-    # to our client input
-    dtype = triton_to_np_dtype(client_input.datatype())
-    X = np.empty(client_input.shape(), dtype=dtype)
+    # start all of our processes inside try/except
+    # block so that we can shut everything down if
+    # there are any errors (including keyboard
+    # interrupt to end things)
     try:
+        for process in processes:
+            process.start()
         while True:
-            # TODO: make this asynchronous in a separate
-            # thread as well
-            for i in range(flags["batch_size"]):
-                for _ in range(sample_stride):
-                    sample = data_generator.get()
-                    input_tensor.update(sample)
-
-                x = input_tensor.value
-                # TODO: do we need to preprocess each separately?
-                # how local are preprocessing transforms? E.g.
-                # normalization is probably fine to do at sample
-                # level
-                x = (x - mean) / std
-                # TODO: see question about target channel
-                # x = bandpass(x, filt_fl, filt_fh, filt_order)
-                X[i] = x.astype(dtype)
-
-            # TODO: infer input names by doing model
-            # status request
-            client_input.set_data_from_numpy(X)
-            triton_client.async_infer(
-                model_name=flags["model_name"],
-                model_version=flags["model_version"],
-                inputs=[client_input],
-                callback=postprocess
-            )
+            # TODO: add something here that streams data
+            # to a bokeh app or something for visualization,
+            # or maybe even add a server process that listens
+            # for updates to the model
+            continue
 
     except Exception as e:
-        data_generator.stop()
-        data_generator.join()
+        for process in processes:
+            if process.is_alive():
+                process.stop()
+                process.join()
         raise e
 
 
