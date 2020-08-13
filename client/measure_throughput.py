@@ -281,7 +281,12 @@ class InputDataBuffer(StoppableIteratingBuffer):
             **kwargs
     ):
         # total number of samples in a single batch
-        self.num_samples = (kernel_stride*(batch_size-1) + kernel_size)*fs
+        num_samples = int((kernel_stride*(batch_size-1) + kernel_size)*fs)
+        self._data = np.empty((len(channels), num_samples))
+        self._target = np.empty((num_samples,))
+    
+        self.batch_overlap = int(num_samples - fs*kernel_stride*batch_size)
+        self.time_offset = kernel_stride*batch_size
 
         # tells us how to window a 2D stream of data into a 3D batch
         slices = []
@@ -306,6 +311,14 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
         super().__init__(**kwargs)
 
+    def initialize_loop(self):
+        for i in range(self.batch_overlap):
+            x, y, gen_time = self.get()
+            if i == 0:
+                self.batch_start_time = gen_time
+            self._data[:, i] = x
+            self._target[i] = y
+
     def read_sensor(self):
         '''
         read individual samples and return an array of size
@@ -318,7 +331,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
         while time.time() < gen_time:
             continue
 
-        samples = [[samples[channel]] for channel in self.channels]
+        samples = [samples[channel] for channel in self.channels]
         x = np.array(samples, dtype=np.float32)
         return x, target, gen_time
 
@@ -334,34 +347,41 @@ class InputDataBuffer(StoppableIteratingBuffer):
         # can be done that locally) to avoid doing thousands
         # of times on the same sample? Where is this limit?
         if self.mean is not None:
-            return (data - self.mean) / self.std
+            return (self._data - self.mean) / self.std
         else:
-            return data
+            return self._data.copy()
 
-    def batch(self, data):
+    def make_batch(self, data):
         '''
         take windows of data at strided intervals and stack them
         '''
         return np.stack([data[:, slc] for slc in self.slices])
 
+    def update(self):
+        '''
+        shift over all the data elements so that we can populate
+        the leftovers with the next batch. Also update the
+        batch_start_time by a full batch worth of stride times
+        '''
+        self._data[:, :self.batch_overlap] = self._data[:, -self.batch_overlap:]
+        self._target[:self.batch_overlap] = self._target[-self.batch_overlap:]
+        self.batch_start_time += self.time_offset
+
     def loop(self):
         # start by reading the next batch of samples
         # TODO: play with numpy to see what's most efficient
         # concat and reshape? read_sensor()[:, None]?
-        data, target = [], []
-        for i in range(self.num_samples):
+        for i in range(self.batch_overlap, self._data.shape[1]):
             x, y, gen_time = read_sensor()
-            if i == 0:
-                batch_gen_time = gen_time
-            data.append(x)
-            target.append(y)
+            self._data[:, i] = x
+            self._target[i] = y
 
-        data = np.hstack(data)
-        target = np.array(target)
-    
-        data = self.preprocess(data)
+        data = self.preprocess()
         data = self.batch(data)
-        self.put((data, target, batch_gen_time))
+        target = self._target.copy()
+        self.put((data, target, self.batch_start_time))
+
+        self.update()
 
 
 class AsyncInferenceClient(StoppableIteratingBuffer):
