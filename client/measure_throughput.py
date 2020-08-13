@@ -6,137 +6,11 @@ from abc import abstractmethod
 from functools import partial
 
 from gwpy.timeseries import TimeSeriesDict
+from deepclean_prod.signal import bandpass, overlap_add
 
 import tritongrpcclient as triton
 from tritongrpcclient import model_config_pb2 as model_config
 from tritonclientutils import triton_to_np_dtype
-
-from deepclean_prod import config
-from deepclean_prod.signal import bandpass
-from . import parse_utils
-
-
-# TODO: move somewhere else
-def get_parser():
-    parser = argparse.ArgumentParser(
-        prog=os.path.basename(__file__), usage="%(prog)s [options]"
-    )
-
-    # Dataset arguments
-    # TODO: can we expose channel-wise inputs on the server side and
-    # do concatenation/windowing there as custom backend? Would prevent
-    # unnecessary data transfer. Possibly even do post processing there
-    # and just send back one sample that's at the center of the batch?
-    # Will depend on extent to which network time is bottlenecking
-    parser.add_argument(
-        "--clean-t0",
-        help="GPS of the first sample",
-        type=int,
-        required=True,
-    )
-    parser.add_argument(
-        "--clean-duration",
-        help="Duration of frame",
-        type=int,
-        required=True
-    )
-    parser.add_argument(
-        "--chanslist",
-        help="Path to channel list",
-        action=parse_utils.ChannelListAction,
-        type=str
-    )
-    parser.add_argument(
-        "--fs",
-        help="Sampling frequency",
-        default=config.DEFAULT_SAMPLE_RATE,
-        type=float,
-    )
-
-    # Timeseries arguments
-    # TODO: can we save these as metadata to the model
-    # and read them as a ModelMetadataRequest? Kernel
-    # size we can even infer from input shape and fs
-    parser.add_argument(
-        "--clean-kernel",
-        help="Length of each segment in seconds",
-        default=config.DEFAULT_CLEAN_KERNEL,
-        type=float,
-    )
-    parser.add_argument(
-        "--clean-stride",
-        help="Stride between segments in seconds",
-        default=config.DEFAULT_CLEAN_STRIDE,
-        type=float,
-    )
-    parser.add_argument(
-        "--pad-mode",
-        help="Padding mode",
-        default=config.DEFAULT_PAD_MODE,
-        type=str
-    )
-
-    # Post-processing arguments
-    parser.add_argument(
-        "--window",
-        help="Window to apply to overlap-add",
-        default=config.DEFAULT_WINDOW,
-        type=str,
-    )
-
-    # Input/output arguments
-    parser.add_argument("--ppr-file", help="Path to preprocessing setting", type=str)
-    parser.add_argument("--out-channel", help="Name of output channel", type=str)
-    parser.add_argument("--log", help="Log file", type=str)
-
-    # Server arguments
-    parser.add_argument(
-        "--url",
-        help="Server url",
-        default="localhost:8001",
-        type=str
-    )
-    parser.add_argument(
-        "--model-name",
-        help="Name of inference model",
-        required=True,
-        type=str
-    )
-    parser.add_argument(
-        "--model-version",
-        help="Model version to use",
-        default=1,
-        type=int
-    )
-    # TODO: can we just get this from the input_shape until we
-    # get dynamic batching working?
-    parser.add_argument(
-        "--batch-size",
-        help="Number of windows to infer on at once",
-        required=True,
-        type=int,
-    )
-
-    # viz plotting arguments
-    parser.add_argument(
-        "--output_dir",
-        help="Directory to write output files",
-        default="/bokeh",
-        type=str
-    )
-    parser.add_argument(
-        "--max_write_arrays",
-        help="Maximum number of (output, target) arrays to keep at once",
-        default=100,
-        type=int
-    )
-    parser.add_argument(
-        "--max_measurements",
-        help"Maximum number of latency/timestamp samples to keep at once",
-        default=1000,
-        type=int
-    )
-    return parser
 
 
 class MaxablePipe:
@@ -176,6 +50,14 @@ class MaxablePipe:
 
 
 class StoppableIteratingBuffer:
+    '''
+    Parent class for callable Process targets that infinitely
+    generate data and so have no internal mechanism which
+    will terminate when .join is called. Adds a `stop` method
+    which will terminate loop and optionally do cleanup, and
+    adds methods for putting data in and pulling it out from
+    connective pipes between processes
+    '''
     def __init__(self, pipe_in=None, pipe_out=None):
         self.pipe_in = pipe_in
         self.pipe_out = pipe_out
@@ -221,15 +103,12 @@ class StoppableIteratingBuffer:
 
 
 class DataGeneratorBuffer(StoppableIteratingBuffer):
-    # TODO: better to use queue for max size?
     def __init__(self, channels, t0, duration, fs, **kwargs):
         self.data = TimeSeriesDict.fetch(
             channels, t0, t0 + duration, nproc=4, allow_tape=True
         )
         self.data.resample(fs)
 
-        # TODO: do something to account for finite generation
-        # time?
         self.sleep_time = 1. / fs
         self.target_channel = channels[0]
         self.channels = sorted(channels[1:])
@@ -449,40 +328,43 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
     
     def process_result(self, target, batch_gen_time, result, error):
         # TODO: add error checking
-        data = result.as_numpy(self.client_output.name())
-        self.put((data, target, batch_gen_time))
+        prediction = result.as_numpy(self.client_output.name())
+        self.put((prediction, target, batch_gen_time))
 
 
 class PostProcessBuffer(StoppableIteratingBuffer):
-    def __init__(self, ppr_file, **kwargs):
+    def __init__(self, fs, ppr_file, **kwargs):
         # TODO: should we do a check on the mean and std like we
         # do during preprocessing?
         with open(ppr_file, "rb") as f:
             ppr = pickle.load(f)
-            self.mean = ppr["mean"]
-            self.std = ppr["std"]
-            self.filt_fl = ppr['filt_fl']
-            self.filt_fh = ppr['filt_fh']
-            self.filt_order = ppr['filt_order']
+            self.uncenter = lambda x: x*ppr["std"] + ppr["mean"]
+            self.bandpass = partial(
+                bandpass,
+                fs=fs,
+                fl=ppr_file["filt_fl"],
+                fh=ppr_file["filt_fh"],
+                order=ppr_file["filt_order"]
+            )
 
         super().__init__(**kwargs)
 
     def loop(self):
-        data, target, batch_gen_time = self.get()
-        data = self.std*data + self.mean
+        prediction, target, batch_gen_time = self.get()
 
-        # TODO: add overlap calculation, maybe keep track of streaming
-        # output tensor to capture overlap from predictions that
-        # weren't in this batch?
-        data = bandpass(data, self.filt_fl, self.filt_fh, self.filt_order)
-        processed_time = time.time()
+        # TOO: include some sort of streaming calculation
+        # to keep track of overlap between batches?
+        prediction = overlap_add(prediction)
+        prediction = self.uncenter(prediction)
+        prediction = self.bandpass(prediction)
 
-        # TODO: May need to account for the finite amount of
-        # time this takes if `conn_in.recv` is never waiting
-        batch_latency = int((processed_time - batch_gen_time)*10**6)
+        # measure latency from time at which first
+        # frame ended
+        completion_time = time.time()
+        batch_latency = int((completion_time - batch_gen_time)*10**6)
 
-        # send everything to some writer to pass to e.g. viz app
-        self.put((data, target, batch_latency, processed_time))
+        # send everything back to main process for handling
+        self.put((prediction, target, batch_latency, completion_time))
 
 
 def main(flags):
@@ -502,7 +384,6 @@ def main(flags):
                 os.remove(os.path.join(subdir, fname))
 
     # build all the pipes between processes
-    # TODO: how will max pipe size affect latency measurements?
     num_samples_per_batch = (
         (flags["clean_stride"]*(flags["batch_size"]-1) + flags["clean_kernel"])*
         flags["fs"]
@@ -597,13 +478,12 @@ def main(flags):
         start_time = time.time()
         i = 0
         lazy_average_latency = 0
-        lazy_average_rmse = 0
 
         csv_rows = ["latency,timestamp"]
         csv_filename = "measurements-" + str(int(start_time*10**6)) + ".csv"
         print("Running demo...")
         while True:
-            data, target, latency, tstamp = results_pipe.get()
+            prediction, target, latency, tstamp = results_pipe.get()
             # tstamp = str(int(tstamp*10**6))
 
             # commenting the file writing out until I figure out viz
@@ -613,14 +493,10 @@ def main(flags):
             lazy_throughput = (i*flags["batch_size"]) / elapsed_time
             lazy_average_latency = (i-1)*lazy_average_latency / i + latency / i
 
-            rmse = ((data - target)**2).mean()**(0.5)
-            lazy_average_rmse = (i-1)*lazy_average_rmse / i + rmse / i
-    
-            msg = "\rThroughput: {} samples/second, Latency: {} us, RMSE: {:0.3f}"
+            msg = "\rThroughput: {} samples/second, Latency: {} us"
             msg.format(
                 int(lazy_throughput),
                 int(lazy_average_latency*10**6),
-                rmse
             )
             print(msg, end="")
 
@@ -633,7 +509,7 @@ def main(flags):
             # but cap at some maximum number of files and name them
             # according to us timestamp to know which ones are old and
             # can be deleted
-            # arr = np.stack([data, target])
+            # arr = np.stack([prediction, target])
             # array_fnames = sorted(os.listdir(os.path.join(output_dir, "arrays")))
             # if len(array_fnames) > flags["max_write_arrays"]:
             #     # delete the earliest files
@@ -663,6 +539,7 @@ def main(flags):
 
 
 if __name__ == "__main__":
-    parser = build_parser(get_parser())
+    from .parse_utils import get_client_parser
+    parser = get_client_parser()
     flags = parser.parse_args()
     main(flags)

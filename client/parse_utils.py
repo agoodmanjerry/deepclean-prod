@@ -3,6 +3,8 @@ import os
 import configparser
 import logging
 
+from deepclean_prod.config import config
+
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,11 @@ class ConfigParserAction(argparse.Action):
 
 
 class ChannelListAction(argparse.Action):
+    '''
+    Allows user to either specify explicit space separated
+    channel names, or a single file containing \n separated
+    channel names
+    '''
     def __call__(self, parser, namespace, values, option_string=None):
         # TODO: put in init, just to lazy to look up the
         # init signature at the moment
@@ -89,6 +96,10 @@ class ChannelListAction(argparse.Action):
 
 
 def build_parser(parent_parser):
+    '''
+    quick utility function for tacking a config option
+    on to any existing parser
+    '''
     parser = argparse.ArgumentParser(
         parents=[parent_parser], conflict_handler="resolve"
     )
@@ -96,3 +107,124 @@ def build_parser(parent_parser):
         "--file", type=str, action=ConfigParserAction, help="Path to config file"
     )
     return parser
+
+
+def get_client_parser():
+    parser = argparse.ArgumentParser()
+
+    # Dataset arguments
+    # TODO: can we expose channel-wise inputs on the server side and
+    # do concatenation/windowing there as custom backend? Would prevent
+    # unnecessary data transfer. Possibly even do post processing there
+    # and just send back one sample that's at the center of the batch?
+    # Will depend on extent to which network time is bottlenecking
+    parser.add_argument(
+        "--clean-t0",
+        help="GPS of the first sample",
+        type=int,
+        required=True,
+    )
+    parser.add_argument(
+        "--clean-duration",
+        help="Duration of frame",
+        type=int,
+        required=True
+    )
+    parser.add_argument(
+        "--chanslist",
+        help="Path to channel list",
+        action=parse_utils.ChannelListAction,
+        type=str
+    )
+    parser.add_argument(
+        "--fs",
+        help="Sampling frequency",
+        default=config.DEFAULT_SAMPLE_RATE,
+        type=float,
+    )
+
+    # Timeseries arguments
+    # TODO: can we save these as metadata to the model
+    # and read them as a ModelMetadataRequest? Kernel
+    # size we can even infer from input shape and fs
+    parser.add_argument(
+        "--clean-kernel",
+        help="Length of each segment in seconds",
+        default=config.DEFAULT_CLEAN_KERNEL,
+        type=float,
+    )
+    parser.add_argument(
+        "--clean-stride",
+        help="Stride between segments in seconds",
+        default=config.DEFAULT_CLEAN_STRIDE,
+        type=float,
+    )
+    parser.add_argument(
+        "--pad-mode",
+        help="Padding mode",
+        default=config.DEFAULT_PAD_MODE,
+        type=str
+    )
+
+    # Post-processing arguments
+    parser.add_argument(
+        "--window",
+        help="Window to apply to overlap-add",
+        default=config.DEFAULT_WINDOW,
+        type=str,
+    )
+
+    # Input/output arguments
+    parser.add_argument("--ppr-file", help="Path to preprocessing setting", type=str)
+    parser.add_argument("--out-channel", help="Name of output channel", type=str)
+    parser.add_argument("--log", help="Log file", type=str)
+
+    # Server arguments
+    parser.add_argument(
+        "--url",
+        help="Server url",
+        default="localhost:8001",
+        type=str
+    )
+    parser.add_argument(
+        "--model-name",
+        help="Name of inference model",
+        required=True,
+        type=str
+    )
+    parser.add_argument(
+        "--model-version",
+        help="Model version to use",
+        default=1,
+        type=int
+    )
+    # TODO: can we just get this from the input_shape until we
+    # get dynamic batching working?
+    parser.add_argument(
+        "--batch-size",
+        help="Number of windows to infer on at once",
+        required=True,
+        type=int,
+    )
+
+    # viz plotting arguments
+    parser.add_argument(
+        "--output_dir",
+        help="Directory to write output files",
+        default="/bokeh",
+        type=str
+    )
+    parser.add_argument(
+        "--max_write_arrays",
+        help="Maximum number of (output, target) arrays to keep at once",
+        default=100,
+        type=int
+    )
+    parser.add_argument(
+        "--max_measurements",
+        help"Maximum number of latency/timestamp samples to keep at once",
+        default=1000,
+        type=int
+    )
+
+    return build_parser(parser)
