@@ -161,7 +161,10 @@ class InputDataBuffer(StoppableIteratingBuffer):
     ):
         # total number of samples in a single batch
         num_samples = int((kernel_stride*(batch_size-1) + kernel_size)*fs)
+
+        # initialize arrays up front
         self._data = np.empty((len(channels), num_samples))
+        self._batch = np.empty((batch_size, len(channels), int(kernel_size*fs)))
         self._target = np.empty((num_samples,))
     
         self.batch_overlap = int(num_samples - fs*kernel_stride*batch_size)
@@ -228,13 +231,21 @@ class InputDataBuffer(StoppableIteratingBuffer):
         if self.mean is not None:
             return (self._data - self.mean) / self.std
         else:
-            return self._data.copy()
+            # TODO: should this be returning a copy?
+            # I think this is safe since I don't really
+            # do anything to it between now and when
+            # it gets assigned to the batch
+            return self._data
 
     def make_batch(self, data):
         '''
         take windows of data at strided intervals and stack them
         '''
-        return np.stack([data[:, slc] for slc in self.slices])
+        for i, slc in enumerate(slices):
+            self._batch[i] = data[:, slc]
+        # doing a return here in case we decide
+        # we need to do a copy, which I think we do
+        return self._batch
 
     def update(self):
         '''
@@ -242,6 +253,9 @@ class InputDataBuffer(StoppableIteratingBuffer):
         the leftovers with the next batch. Also update the
         batch_start_time by a full batch worth of stride times
         '''
+        # TODO: does it make sense to do the copy here, since we'll
+        # need to be waiting for the next batch of samples to generate
+        # anyway?
         self._data[:, :self.batch_overlap] = self._data[:, -self.batch_overlap:]
         self._target[:self.batch_overlap] = self._target[-self.batch_overlap:]
         self.batch_start_time += self.time_offset
@@ -256,9 +270,9 @@ class InputDataBuffer(StoppableIteratingBuffer):
             self._target[i] = y
 
         data = self.preprocess()
-        data = self.batch(data)
+        batch = self.make_batch(data)
         target = self._target.copy()
-        self.put((data, target, self.batch_start_time))
+        self.put((batch, target, self.batch_start_time))
 
         self.update()
 
