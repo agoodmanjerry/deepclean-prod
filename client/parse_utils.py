@@ -206,25 +206,4 @@ def get_client_parser():
         required=True,
         type=int,
     )
-
-    # viz plotting arguments
-    parser.add_argument(
-        "--output_dir",
-        help="Directory to write output files",
-        default="/bokeh",
-        type=str
-    )
-    parser.add_argument(
-        "--max_write_arrays",
-        help="Maximum number of (output, target) arrays to keep at once",
-        default=100,
-        type=int
-    )
-    parser.add_argument(
-        "--max_measurements",
-        help"Maximum number of latency/timestamp samples to keep at once",
-        default=1000,
-        type=int
-    )
-
     return build_parser(parser)
