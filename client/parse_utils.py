@@ -3,7 +3,7 @@ import os
 import configparser
 import logging
 
-from deepclean_prod.config import config
+from deepclean_prod import config
 
 
 logger = logging.getLogger(__name__)

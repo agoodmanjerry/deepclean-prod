@@ -3,5 +3,5 @@ scipy>=0.16.0
 matplotlib>=1.4.1
 gwpy
 torchsummary
-torch==1.0.0
+torch>=1.0.0
 torchvision

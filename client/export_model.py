@@ -1,13 +1,12 @@
 import os
-import version
+import shutil
 
 import torch
-import tensorrt as trt
-from tensorrtserver.api import model_config_pb2 as model_config
+from tritongrpcclient import model_config_pb2 as model_config
 
-from . import parse_utils
+import parse_utils
 from deepclean_prod.nn.net import DeepClean
-from deepclean_prod.config import config
+from deepclean_prod import config
 
 
 torch.set_default_tensor_type(torch.cuda.FloatTensor)
@@ -142,13 +141,17 @@ def main(flags):
         #     dynamic_axes=dynamic_axes
     )
 
-    # write config
-    with open(os.path.join(onnx_dir, "config.pbtxt"), "w") as f:
-        f.write(str(onnx_config))
-
     # do trt conversion
-    convert_to_tensorrt(flags["model_store_dir"], base_config, use_fp16=False)
-    convert_to_tensorrt(flags["model_store_dir"], base_config, use_fp16=True)
+    if "trt-fp32" in flags["export_as"]:
+        convert_to_tensorrt(flags["model_store_dir"], base_config, use_fp16=False)
+    if "trt-fp16" in flags["export_as"]:
+        convert_to_tensorrt(flags["model_store_dir"], base_config, use_fp16=True)
+
+    if "onnx" in flags["export_as"]:
+        with open(os.path.join(onnx_dir, "config.pbtxt"), "w") as f:
+            f.write(str(onnx_config))
+    else:
+        shutil.rmtree(onnx_dir)
 
 
 if __name__ == "__main__":
@@ -187,7 +190,31 @@ if __name__ == "__main__":
         default="modelstore",
         help="Path to root model store directory",
     )
+    parser.add_argument(
+        "--export-as",
+        type=str,
+        nargs="+",
+        choices=("onnx", "trt-fp32", "trt-fp16", "all"),
+        default=["all"],
+        help="Which type of format to export as"
+    )
 
     parser = parse_utils.build_parser(parser)
     flags = parser.parse_args()
-    main(vars(flags))
+    flags = vars(flags)
+
+    if "all" in flags["export_as"]:
+        flags["export_as"] = ["onnx", "trt-fp32", "trt-fp16"]
+    if any([i.startswith("trt") for i in flags["export_as"]]):
+        try:
+            import tensorrt as trt
+        except ModuleNotFoundError as e:
+            msg = (
+                "Tried to export model as version(s) {}, but "
+                "TensorRT library is not installed!".format(
+                    ", ".join(
+                        [i for i in flags["export_as"] if i.startswith("trt")])
+            ))
+            raise ModuleNotFoundError(msg) from e
+
+    main(flags)
