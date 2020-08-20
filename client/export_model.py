@@ -79,7 +79,7 @@ def convert_to_tensorrt(model_store_dir, base_config, use_fp16=False):
 
 def main(flags):
     # TODO: what's the input dimensionality?
-    input_dim = flags["clean_kernel"] * flags["fs"]
+    input_dim = int(flags["clean_kernel"] * flags["fs"])
 
     # define a base config that has all the universal
     # properties. TODO: add in metadata recording
