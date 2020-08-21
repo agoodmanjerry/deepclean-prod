@@ -6,7 +6,8 @@ before_script:
 
 docker:
   stage: build
-  only: "client-demo"
+  only:
+    - "client-demo"
   variables:
     TAG: "20.07"
   script:
