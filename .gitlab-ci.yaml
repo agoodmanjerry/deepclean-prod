@@ -3,7 +3,7 @@ stages:
 
 workflow:
   rules:
-    - if: $CI_COMMIT_BRANCH
+    - if: '$CI_COMMIT_BRANCH == "client-demo"'
       when: always
 
 before_script:
