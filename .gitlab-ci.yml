@@ -11,8 +11,8 @@ docker:
   variables:
     TAG: "20.07"
   script:
-    - docker build --rm --no-cache -t $CI_REGISTRY_IMAGE:client-$TAG --build-arg TAG=$TAG  .
-    - docker pull nvcr.io/nvidia/tritonserver:$TAG-py3
-    - docker tag nvcr.io/nvidia/tritonserver:$TAG-py3 ${CI_REGISTRY_NAME}:server-${TAG}
-    - docker push ${CI_REGISTRY_IMAGE}:client-$TAG
-    - docker push ${CI_REGISTRY_IMAGE}:server-$TAG
+    - docker build --rm --no-cache -t ${CI_REGISTRY_IMAGE}:client-$TAG --build-arg TAG=${TAG}  .
+    - docker pull nvcr.io/nvidia/tritonserver:${TAG}-py3
+    - docker tag nvcr.io/nvidia/tritonserver:${TAG}-py3 ${CI_REGISTRY_IMAGE}:server-${TAG}
+    - docker push ${CI_REGISTRY_IMAGE}:client-${TAG}
+    - docker push ${CI_REGISTRY_IMAGE}:server-${TAG}
