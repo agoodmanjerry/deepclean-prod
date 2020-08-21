@@ -1,5 +1,4 @@
 ARG TAG=20.07
-
 FROM nvcr.io/nvidia/pytorch:${TAG}-py3
 ARG TAG
 
