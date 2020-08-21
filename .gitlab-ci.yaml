@@ -1,0 +1,15 @@
+stages:
+  - build
+
+before_script:
+  -  docker login -u $CI_REGISTRY_USER -p $CI_BUILD_TOKEN $CI_REGISTRY
+
+docker:devel:
+  only:
+    - devel
+  stage: build
+  variables:
+    TAG: 20.07
+  script:
+    - docker build --rm --no-cache -t $CI_REGISTRY_IMAGE:client-$TAG --build-arg TAG=$TAG  .
+    - docker push ${CI_REGISTRY_IMAGE}:client-$TAG
