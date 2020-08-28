@@ -336,7 +336,7 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
             model_name=self.model_name,
             model_version=self.model_version,
             inputs=[self.client_input],
-            outputs=[self.client_output]
+            outputs=[self.client_output],
             callback=callback
         )
     
@@ -383,7 +383,7 @@ class PostProcessBuffer(StoppableIteratingBuffer):
 
 def main(flags):
     # set up output directory
-    if not os.path.exists(flags["output_dir"])
+    if not os.path.exists(flags["output_dir"]):
         os.makedirs(flags["output_dir"])
     run_name = flags["model_name"] + "-batch_size_" + str(flags["batch_size"])
     output_dir = os.path.join(flags["output_dir"], run_name)

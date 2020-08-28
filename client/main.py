@@ -10,7 +10,7 @@ from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource
 from bokeh.server.server import Server
 
-from .inference_sim import build_simulation
+from inference_sim import build_simulation
 from deepclean_prod import signal
 
 
@@ -22,7 +22,7 @@ streaming_metrics = {
     "mean_latency": 0,
     "mean_throughput": 0,
     "std_latency": 0,
-    "std_throughput", 0,
+    "std_throughput": 0,
 }
 
 data_streams = {
@@ -32,7 +32,7 @@ data_streams = {
 
 line_ds = ColumnDataSource({
     "x": [],
-    "pred": 
+    "pred": [],
     "target": []
 })
 
@@ -154,7 +154,7 @@ def update_line():
     count_x = len(new_data["x"])
     if count_x <= SAMPLES_IN_LINE:
         num_extend = min(NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE - count_x)
-        new_data["x"].extend(range(count_x, count_x+num_extend)))
+        new_data["x"].extend(range(count_x, count_x+num_extend))
 
     # update data source
     line_ds.data = new_data
