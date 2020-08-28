@@ -133,7 +133,8 @@ def get_client_parser():
     parser.add_argument(
         "--chanslist",
         help="Path to channel list",
-        action=parse_utils.ChannelListAction,
+        nargs="+",
+        action=ChannelListAction,
         type=str
     )
     parser.add_argument(

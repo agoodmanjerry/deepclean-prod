@@ -1,10 +1,11 @@
-import os
 import multiprocessing as mp
-import numpy as np
+import os
+import pickle
 import time
 from abc import abstractmethod
 from functools import partial
 
+import numpy as np
 from gwpy.timeseries import TimeSeriesDict
 from deepclean_prod.signal import bandpass, overlap_add
 
@@ -104,7 +105,7 @@ class StoppableIteratingBuffer:
 
 class DataGeneratorBuffer(StoppableIteratingBuffer):
     def __init__(self, channels, t0, duration, fs, **kwargs):
-        self.data = TimeSeriesDict.fetch(
+        self.data = TimeSeriesDict.get(
             channels, t0, t0 + duration, nproc=4, allow_tape=True
         )
         self.data.resample(fs)
@@ -195,7 +196,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
     def initialize_loop(self):
         for i in range(self.batch_overlap):
-            x, y, gen_time = self.get()
+            x, y, gen_time = self.read_sensor()
             if i == 0:
                 self.batch_start_time = gen_time
             self._data[:, i] = x
@@ -217,7 +218,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
         x = np.array(samples, dtype=np.float32)
         return x, target, gen_time
 
-    def preprocess(self, data):
+    def preprocess(self):
         '''
         perform any preprocessing transformations on the data
         just does normalization for now
@@ -241,7 +242,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
         '''
         take windows of data at strided intervals and stack them
         '''
-        for i, slc in enumerate(slices):
+        for i, slc in enumerate(self.slices):
             self._batch[i] = data[:, slc]
         # doing a return here in case we decide
         # we need to do a copy, which I think we do
@@ -265,7 +266,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
         # TODO: play with numpy to see what's most efficient
         # concat and reshape? read_sensor()[:, None]?
         for i in range(self.batch_overlap, self._data.shape[1]):
-            x, y, gen_time = read_sensor()
+            x, y, gen_time = self.read_sensor()
             self._data[:, i] = x
             self._target[i] = y
 
@@ -308,19 +309,21 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
             # double check that load worked
             assert client.is_model_ready(model_name)
 
-        metadata = client.get_model_metadata(model_name)
+        model_metadata = client.get_model_metadata(model_name)
         # TODO: find better way to check version, or even to
         # load specific version
-        assert model_metadata.versions[0] == model_version
+        # assert model_metadata.versions[0] == model_version
 
-        model_input = model_metadata.input[0]
-        data_type_name = model_config.DataType.Name(model_input.data_type)
-        data_type = data_type_name.split("_", maxsplit=1)[1]
+        model_input = model_metadata.inputs[0]
+        # data_type_name = model_config.DataType.Name(model_input.datatype)
+        data_type = model_input.datatype
+        # data_type = data_type_name.split("_", maxsplit=1)[1]
+        print(data_type)
 
-        model_output = model_metadata.ouptut[0]
+        model_output = model_metadata.outputs[0]
 
         self.client_input = triton.InferInput(
-            model_input.name, tuple(model_input.dims), data_type
+            model_input.name, tuple(model_input.shape), data_type
         )
         self.client_output = triton.InferRequestedOutput(model_output.name)
         self.client = client
@@ -331,7 +334,7 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         callback=partial(
             self.process_result, target=y, batch_gen_time=batch_gen_time)
     
-        self.client_input.set_data_from_numpy(X)
+        self.client_input.set_data_from_numpy(X.astype('float32'))
         self.client.async_infer(
             model_name=self.model_name,
             model_version=self.model_version,
@@ -347,7 +350,7 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
 
 
 class PostProcessBuffer(StoppableIteratingBuffer):
-    def __init__(self, fs, ppr_file, **kwargs):
+    def __init__(self, kernel_size, kernel_stride, fs, ppr_file, **kwargs):
         # TODO: should we do a check on the mean and std like we
         # do during preprocessing?
         with open(ppr_file, "rb") as f:
@@ -356,10 +359,13 @@ class PostProcessBuffer(StoppableIteratingBuffer):
             self.bandpass = partial(
                 bandpass,
                 fs=fs,
-                fl=ppr_file["filt_fl"],
-                fh=ppr_file["filt_fh"],
-                order=ppr_file["filt_order"]
+                fl=ppr["filt_fl"],
+                fh=ppr["filt_fh"],
+                order=ppr["filt_order"]
             )
+        noverlap = int(fs*kernel_size) - int(fs*kernel_stride)
+        self.overlap_add = partial(
+            overlap_add, noverlap=noverlap, window="boxcar")
 
         super().__init__(**kwargs)
 
@@ -368,7 +374,7 @@ class PostProcessBuffer(StoppableIteratingBuffer):
 
         # TOO: include some sort of streaming calculation
         # to keep track of overlap between batches?
-        prediction = overlap_add(prediction)
+        prediction = self.overlap_add(prediction)
         prediction = self.uncenter(prediction)
         prediction = self.bandpass(prediction)
 
@@ -436,6 +442,8 @@ def build_simulation(flags):
     # apply postprocessing (denormalizing, bandpass
     # filtering, accumulating across windows)
     postprocess_buffer = PostProcessBuffer(
+        flags["clean_kernel"],
+        flags["clean_stride"],
         flags["fs"],
         flags["ppr_file"],
         pipe_in=infer_pipe,

@@ -3,6 +3,8 @@ import numpy as np
 import time
 import pickle
 from functools import partial
+import sys
+sys.path.insert(0, "/opt/conda/pkgs/nds2-client-0.16.6-hd02d5f2_0/libexec/nds2-client/modules/nds2-1_6/")
 
 from bokeh.layouts import row
 from bokeh.io import curdoc
@@ -186,18 +188,18 @@ server = Server({'/': application})
 server.start()
 
 if __name__ == '__main__':
-    from .parse_utils import get_client_parser
+    from parse_utils import get_client_parser
     parser = get_client_parser()
-    flags = vars(parser.parse_arguments())
+    flags = vars(parser.parse_args())
 
-    with open(flags["ppr_file"], "r") as f:
+    with open(flags["ppr_file"], "rb") as f:
         ppr = pickle.load(f)
         bandpass = partial(
             signal.bandpass,
             fs=flags["fs"],
-            fl=ppr_file["filt_fl"],
-            fh=ppr_file["filt_fh"],
-            order=ppr_file["filt_order"]
+            fl=ppr["filt_fl"],
+            fh=ppr["filt_fh"],
+            order=ppr["filt_order"]
         )
 
     buffers, out_pipe = build_simulation(flags)
