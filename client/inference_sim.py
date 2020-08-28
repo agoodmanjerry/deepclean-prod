@@ -381,26 +381,10 @@ class PostProcessBuffer(StoppableIteratingBuffer):
         self.put((prediction, target, batch_latency, completion_time))
 
 
-def main(flags):
-    # set up output directory
-    if not os.path.exists(flags["output_dir"]):
-        os.makedirs(flags["output_dir"])
-    run_name = flags["model_name"] + "-batch_size_" + str(flags["batch_size"])
-    output_dir = os.path.join(flags["output_dir"], run_name)
-
-    # TODO: do we need any others?
-    for subdir in ["arrays"]:
-        subdir = os.path.join(output_dir, subdir)
-        if not os.path.exists(subdir):
-            os.makedirs(subdir)
-        elif len(os.listdir(subdir)) > 0:
-            for fname in os.listdir(subdir):
-                os.remove(os.path.join(subdir, fname))
-
-    # build all the pipes between processes
+def build_simulation(flags):
     num_samples_per_batch = (
-        (flags["clean_stride"]*(flags["batch_size"]-1) + flags["clean_kernel"])*
-        flags["fs"]
+        (flags["clean_stride"]*(flags["batch_size"]-1) + flags["clean_kernel"])
+        *flags["fs"]
     )
     max_num_batches = 1000
 
@@ -423,7 +407,6 @@ def main(flags):
         flags["fs"],
         pipe_out=raw_data_pipe
     )
-    data_generator = mp.Process(target=raw_data_buffer)
 
     # asynchronously read samples from data generation process,
     # accumulate a batch's worth, apply preprocessing, then
@@ -434,126 +417,36 @@ def main(flags):
         flags["clean_kernel"],
         flags["clean_stride"],
         flags["fs"],
-        ppr_file=flags["ppr_file"],
+        flags["ppr_file"],
         pipe_in=raw_data_pipe,
         pipe_out=preproc_pipe
     )
-    preprocessor = mp.Process(target=preprocess_buffer)
 
     # asynchronously read preprocessed data and submit to
     # triton for model inference
     client_buffer = AsyncInferenceClient(
         flags["url"],
         flags["model_name"],
-        str(flags["model_version"]),
+        flags["model_version"],
         pipe_in=preproc_pipe,
         pipe_out=infer_pipe
     )
-    client = mp.Process(target=client_buffer)
 
     # asynchronously receive outputs from triton and
     # apply postprocessing (denormalizing, bandpass
     # filtering, accumulating across windows)
     postprocess_buffer = PostProcessBuffer(
+        flags["fs"],
         flags["ppr_file"],
         pipe_in=infer_pipe,
         pipe_out=results_pipe
     )
-    postprocessor = mp.Process(target=postprocess_buffer)
 
-    processes = [
-        data_generator,
-        preprocessor,
-        client,
-        postprocessor
+    buffers = [
+        raw_data_buffer,
+        preprocess_buffer,
+        client_buffer,
+        postprocess_buffer
     ]
-    pipes = [
-        raw_data_pipe,
-        preproc_pipe,
-        infer_pipe,
-        results_pipe
-    ]
+    return buffers, results_pipe
 
-    # start all of our processes inside try/except
-    # block so that we can shut everything down if
-    # there are any errors (including keyboard
-    # interrupt to end things)
-    try:
-        for process in processes:
-            process.start()
-
-        # TODO: instead of files here, should we use
-        # mp.connection.Listener and set up a client on
-        # the other end?
-
-        # write latency measurements to csv, name it with
-        # start time so that we can calculate throughput
-        # measurements on the read side however we like
-        start_time = time.time()
-        i = 0
-        lazy_average_latency = 0
-
-        csv_rows = ["latency,timestamp"]
-        csv_filename = "measurements-" + str(int(start_time*10**6)) + ".csv"
-        print("Running demo...")
-        while True:
-            prediction, target, latency, tstamp = results_pipe.get()
-            # tstamp = str(int(tstamp*10**6))
-
-            # commenting the file writing out until I figure out viz
-            # and I/O issues. Just going to print running throughput for now
-            i += 1
-            elapsed_time = tstamp - start_time
-            lazy_throughput = (i*flags["batch_size"]) / elapsed_time
-            lazy_average_latency = (i-1)*lazy_average_latency / i + latency / i
-
-            msg = "\rThroughput: {} samples/second, Latency: {} us"
-            msg.format(
-                int(lazy_throughput),
-                int(lazy_average_latency*10**6),
-            )
-            print(msg, end="")
-
-            # TODO: add checks to avoid writing to files opened
-            # by other processes, particularly for the measurement
-            # csv write
-
-            # save out the prediction and the target to a numpy array
-            # Create some slack for a reader process to be behind,
-            # but cap at some maximum number of files and name them
-            # according to us timestamp to know which ones are old and
-            # can be deleted
-            # arr = np.stack([prediction, target])
-            # array_fnames = sorted(os.listdir(os.path.join(output_dir, "arrays")))
-            # if len(array_fnames) > flags["max_write_arrays"]:
-            #     # delete the earliest files
-            #     os.remove(os.path.join(output_dir, "arrays", array_fnames[0]))
-            # np.save(os.path.join(output_dir, "arrays", tstamp), arr)
-
-            # # TODO: does it make more sense to do an append here
-            # # and leave the job of deleting stuff to the reading
-            # # process? Seems unsafe if the reading process dies
-            # # or something
-            # row = f"{latency},{timestamp}"
-            # if len(csv_rows) >= flags["max_measurements"]:
-            #     del csv_rows[1]
-            # csv_rows.append(row)
-            # csv_string = "\n".join(csv_rows)
-            # with open(os.path.join(output_dir, csv_filename), "w") as f:
-            #     f.write(csv_string)
-
-    except Exception as e:
-        for process in processes:
-            if process.is_alive():
-                process.stop()
-                process.join()
-        for pipe in pipes:
-            pipe.close()
-        raise e
-
-
-if __name__ == "__main__":
-    from .parse_utils import get_client_parser
-    parser = get_client_parser()
-    flags = parser.parse_args()
-    main(flags)
