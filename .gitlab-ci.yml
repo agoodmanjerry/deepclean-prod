@@ -10,7 +10,7 @@ docker:
     - "client-demo"
   variables:
     TAG: "20.07"
-    script:
+  script:
     - docker build --rm --no-cache -t ${CI_REGISTRY_IMAGE}:export-$TAG --build-arg tag=${TAG} -f docker/Dockerfile.export .
     - docker build --rm --no-cache -t ${CI_REGISTRY_IMAGE}:client-$TAG --build-arg tag=${TAG} -f docker/Dockerfile.client .
     - docker pull nvcr.io/nvidia/tritonserver:${TAG}-py3
