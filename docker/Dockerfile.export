@@ -10,7 +10,7 @@ RUN mkdir -p ${CLIENT_DIR} && \
       wget -O ${CLIENT_DIR}/clients.tar.gz https://github.com/NVIDIA/triton-inference-server/releases/download/v${RELEASE}/v${RELEASE}_ubuntu1804.clients.tar.gz && \
       cd ${CLIENT_DIR} && \
       tar xzf clients.tar.gz && \
-      pip install --upgrade ${CLIENT_DIR}/python/tensorrtserver-*.whl
+      pip install --upgrade ${CLIENT_DIR}/python/triton*.whl
 
 # install deepclean_prod
 ADD . deepclean_prod/
