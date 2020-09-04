@@ -327,6 +327,9 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         )
         self.client_output = triton.InferRequestedOutput(model_output.name)
         self.client = client
+
+        self.model_name = model_name
+        self.model_version = str(model_version)
         super().__init__(**kwargs)
 
     def loop(self):

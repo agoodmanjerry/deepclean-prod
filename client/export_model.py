@@ -1,3 +1,5 @@
+import contextlib
+import logging
 import os
 import shutil
 
@@ -10,6 +12,8 @@ from deepclean_prod import config
 
 
 torch.set_default_tensor_type(torch.cuda.FloatTensor)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 def soft_makedirs(path):
@@ -26,6 +30,9 @@ def soft_makedirs(path):
 
 
 def convert_to_tensorrt(model_store_dir, base_config, use_fp16=False):
+    logger.info("Building TensorRT model with precison {}".format(
+        "fp16" if use_fp16 else "fp32")
+    )
     trt_config = model_config.ModelConfig(
         name="deepclean_trt" + ("_fp16" if use_fp16 else "_fp32"),
         platform="tensorrt_plan",
@@ -37,48 +44,50 @@ def convert_to_tensorrt(model_store_dir, base_config, use_fp16=False):
 
     # set up a plan builder
     TRT_LOGGER = trt.Logger()
-    builder = trt.Builder(TRT_LOGGER)
-    builder.max_workspace_size = 1 << 28  # 256 MiB
-    builder.max_batch_size = 1  # flags['batch_size']
-    if use_fp16:
-        builder.fp16_mode = True
-        builder.strict_type_constraints = True
+    with contextlib.ExitStack() as stack:
+        builder = stack.enter_context(trt.Builder(TRT_LOGGER))
+        builder.max_workspace_size = 1 << 28 # 256 MiB
+        builder.max_batch_size = 1  # flags['batch_size']
+        if use_fp16:
+            builder.fp16_mode = True
+            builder.strict_type_constraints = True
 
-    #   config = builder.create_builder_config()
-    #   profile = builder.create_optimization_profile()
-    #   min_shape = tuple([1] + onnx_config.input[0].dims[1:])
-    #   max_shape = tuple([8] + onnx_config.input[0].dims[1:])
+        #   config = builder.create_builder_config()
+        #   profile = builder.create_optimization_profile()
+        #   min_shape = tuple([1] + onnx_config.input[0].dims[1:])
+        #   max_shape = tuple([8] + onnx_config.input[0].dims[1:])
 
-    #   optimal_shape = max_shape
-    #   profile.set_shape('input', min_shape, optimal_shape, max_shape)
-    #   config.add_optimization_profile(profile)
+        #   optimal_shape = max_shape
+        #   profile.set_shape('input', min_shape, optimal_shape, max_shape)
+        #   config.add_optimization_profile(profile)
 
-    # initialize a parser with a network and fill in that
-    # network with the onnx file we just saved
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
-    parser = trt.OnnxParser(network, TRT_LOGGER)
-    onnx_path = os.path.join(model_store_dir, "deepclean_onnx", "0", "model.onnx")
-    with open(onnx_path, "rb") as f:
-        parser.parse(f.read())
+        # initialize a parser with a network and fill in that
+        # network with the onnx file we just saved
+        network = stack.enter_context(builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        ))
 
-    #   last_layer = network.get_layer(network.num_layers - 1)
-    #   if not last_layer.get_output(0):
-    #     network.mark_output(last_layer.get_output(0))
+        parser = stack.enter_context(trt.OnnxParser(network, TRT_LOGGER))
+        onnx_path = os.path.join(model_store_dir, "deepclean_onnx", "0", "model.onnx")
+        with open(onnx_path, "rb") as f:
+            parser.parse(f.read())
 
-    # build an engine from that network
-    engine = builder.build_cuda_engine(network)
-    with open(os.path.join(trt_dir, "0", "model.plan"), "wb") as f:
-        f.write(engine.serialize())
+        last_layer = network.get_layer(network.num_layers - 1)
+        if not last_layer.get_output(0):
+            logger.info("Marking output layer")
+            network.mark_output(last_layer.get_output(0))
 
-    # export config
-    with open(os.path.join(trt_dir, "config.pbtxt"), "w") as f:
-        f.write(str(trt_config))
+        # build an engine from that network
+        engine = builder.build_cuda_engine(network)
+        with open(os.path.join(trt_dir, "0", "model.plan"), "wb") as f:
+            f.write(engine.serialize())
+
+        # export config
+        with open(os.path.join(trt_dir, "config.pbtxt"), "w") as f:
+            f.write(str(trt_config))
 
 
 def main(flags):
-    # TODO: what's the input dimensionality?
     input_dim = int(flags["clean_kernel"] * flags["fs"])
 
     # define a base config that has all the universal
@@ -86,6 +95,10 @@ def main(flags):
     # fs and kernel size (or really just one of them
     # since we can always do some quick math to get
     # the other from the input shape)
+    flags["chanslist"] = flags["chanslist"][1:]
+    logger.info("Building model from channels:{}".format(
+        "\n\t".join(flags["chanslist"])
+    ))
     base_config = model_config.ModelConfig(
         # max_batch_size=flags['batch_size'],
         input=[
@@ -151,6 +164,7 @@ def main(flags):
         with open(os.path.join(onnx_dir, "config.pbtxt"), "w") as f:
             f.write(str(onnx_config))
     else:
+        logger.info("Removing onnx model")
         shutil.rmtree(onnx_dir)
 
 
