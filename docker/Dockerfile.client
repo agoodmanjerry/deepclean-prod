@@ -1,0 +1,26 @@
+FROM ubuntu:18.04
+RUN mkdir -p /cvmfs /hdfs /gpfs /ceph /hadoop /etc/condor
+
+ADD https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh /miniconda.sh
+RUN sh /miniconda.sh -b -p /conda && \
+      /conda/bin/conda update -n base conda && \
+      /conda/bin/conda create --name deepclean -c conda-forge \
+          python=3.7 bokeh numpy scipy python-nds2-client gwpy pytorch pip
+
+ENV PATH=${PATH}:/conda/bin
+SHELL ["/bin/bash", "-c"]
+
+ADD . /opt/deepclean/
+RUN apt-get update && apt-get install -y curl wget && \ 
+        source activate deepclean && pip install /opt/deepclean
+
+ARG tag=20.07
+ENV CLIENT_DIR=/opt/tensorrtserver/client
+RUN source activate deepclean && \
+      mkdir -p ${CLIENT_DIR} && \
+      RELEASE=$(curl -s https://raw.githubusercontent.com/NVIDIA/triton-inference-server/r${tag}/VERSION) && \
+      wget -O ${CLIENT_DIR}/clients.tar.gz https://github.com/NVIDIA/triton-inference-server/releases/download/v${RELEASE}/v${RELEASE}_ubuntu1804.clients.tar.gz && \
+      cd ${CLIENT_DIR} && \
+      tar xzf clients.tar.gz && \
+      pip install --upgrade ${CLIENT_DIR}/python/triton*.whl
+

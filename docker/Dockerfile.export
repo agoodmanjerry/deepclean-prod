@@ -1,7 +1,7 @@
-
 ARG tag=20.07
 FROM nvcr.io/nvidia/pytorch:${tag}-py3
 ARG tag
+RUN mkdir -p /cvmfs /hdfs /gpfs /ceph /hadoop /etc/condor
 
 # install triton client libraries
 ENV CLIENT_DIR=/opt/tensorrtserver/client
