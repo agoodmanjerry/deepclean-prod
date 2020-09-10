@@ -14,4 +14,4 @@ RUN mkdir -p ${CLIENT_DIR} && \
 
 # install deepclean_prod
 ADD . deepclean_prod/
-RUN pip install --no-cache-dir deepclean_prod/
+RUN pip install --no-cache-dir gwpy deepclean_prod/
