@@ -144,6 +144,8 @@ def main(flags):
     # TODO: add in command line args for selecting which
     # type of export to do, including an "all" option
     model = DeepClean(len(flags["chanslist"]))
+    print(model(dummy_input).shape)
+
     torch.onnx.export(
         model,
         dummy_input,

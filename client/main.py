@@ -6,13 +6,14 @@ from functools import partial
 import sys
 sys.path.insert(0, "/opt/conda/pkgs/nds2-client-0.16.6-hd02d5f2_0/libexec/nds2-client/modules/nds2-1_6/")
 
-from bokeh.layouts import row
+from bokeh.layouts import row, column
 from bokeh.io import curdoc
 from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource
 from bokeh.server.server import Server
+from bokeh.palettes import Category10_4 as palette
 
-from inference_sim import build_simulation
+from inference_sim import build_simulation, StreamingMetric
 from deepclean_prod import signal
 
 
@@ -20,11 +21,8 @@ SAMPLES_IN_LINE = 10000
 NUM_SAMPLES_EXTEND = 800
 
 streaming_metrics = {
-    "batches": 0,
-    "mean_latency": 0,
-    "mean_throughput": 0,
-    "std_latency": 0,
-    "std_throughput": 0,
+    "throughput": StreamingMetric(0.95),
+    "latency": StreamingMetric(0.95)
 }
 
 data_streams = {
@@ -32,30 +30,32 @@ data_streams = {
     "target": np.array([]) 
 }
 
-line_ds = ColumnDataSource({
-    "x": [],
-    "pred": [],
-    "target": []
-})
+glyph_data = {
+    "line": {
+        "x": [],
+        "pred": [],
+        "target": []
+    },
+    "circle": {
+        "latency": [],
+        "throughput": [],
+        "label": []
+    },
+    "patches": {
+        "x": [],
+        "y": []
+    },
+    "queue": {
+        "xs": [[] for _ in range(4)],
+        "ys": [[] for _ in range(4)],
+        "color": palette,
+        "label": ["generate", "preproc", "inference", "postproc"]
 
-circ_ds = ColumnDataSource({
-    "x": [],
-    "y": []
-})
-patch_ds = ColumnDataSource({
-    "x": [],
-    "y": []
-})
-
-
-# TODO: add some decay to downweight transient behavior?
-def update_running_mean(value, update, N):
-    return value + (update-value)/N
-
-
-def update_running_std(value, update, N, new_mean, old_mean):
-    variance = (value + (update-old_mean)*(update-new_mean))/(N-1)
-    return np.sqrt(variance)
+    }
+}
+sources = {
+    glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
+}
 
 
 def get_data():
@@ -65,13 +65,36 @@ def get_data():
     '''
     global data_streams
     global streaming_metrics
+    global sources
+
+    global start_time
+    global processes
+    if start_time is None:
+        start_time = time.time()
+        for process in processes:
+            process.start()
 
     # return model prediction, target channel,
     # the timestamp at which processing was finished,
-    # and the latency as measured from the *last sample*
-    # of the *first batch element*
-    prediction, target, tstamp, latency = out_pipe.get()
-    streaming_metrics["batches"] += 1
+    prediction, target, output_tstamp = out_pipe.get()
+    batches = streaming_metrics["latency"].samples_seen + 1
+    samples_seen = batches*flags["batch_size"]
+
+    # we'll measure latency from the *last sample* of the *first frame*
+    # we can calculate this time as:
+    # start_time
+    time_sample_generated = start_time
+    #     plus time delta to the start of this batch
+    time_sample_generated += flags["clean_stride"]*(samples_seen - 1)
+    #     plus the length of time of a single frame
+    time_sample_generated += flags["clean_kernel"]
+
+    latency = output_tstamp - time_sample_generated
+    latency = int(latency*10**6)
+    streaming_metrics["latency"].update(latency)
+
+    throughput = samples_seen / (output_tstamp - start_time)
+    streaming_metrics["throughput"].update(throughput)
 
     # append data to existing data stream
     target = bandpass(target)
@@ -80,52 +103,41 @@ def get_data():
     data_streams["pred"] = np.concatenate([data_streams["pred"], prediction])
     data_streams["target"] = np.concatenate([data_streams["target"], target])
 
-    # update streaming metric estimates
-    throughput = (
-        streaming_metrics["batches"]*flags["samples_seen"] / 
-        (tstamp - start_time)
-    )
-    updates = {"latency": latency, "throughput": throughput}
-    for metric in ["latency", "throughput"]:
-        old_mean = streaming_metrics["mean_" + metric]
-        update = updates[metric]
-        new_mean = update_running_mean(
-            old_mean, update, streaming_metrics["batches"])
+    # update our throughput/latency plots
+    new_circle_data = sources["circle"].data.copy()
+    for metric_name, metric in streaming_metrics.items():
+        [metric_name][-1] = metric.mean
+    sources["circle"].data = new_circle_data
 
-        old_std = streaming_metrics["std_" + metric]
-        new_std = update_running_std(
-            old_std,
-            update,
-            streaming_metrics["batches"],
-            new_mean,
-            old_mean
-        )
-        streaming_metrics["mean_"+metric] = new_mean
-        streaming_metrics["std_"+metric] = new_std
-
-    new_circle_data = {
-        "x": [streaming_metrics["mean_latency"]],
-        "y": [streaming_metrics["mean_throughput"]]
-    }
-    circ_ds.data = new_circle_data
-
-    # plot standard deviations around mean estimates as
-    # an ellipse
+    std_latency = max(np.sqrt(streaming_metrics["latency"].var), 1e-9)
+    std_throughput = np.sqrt(streaming_metrics["throughput"].var)
     ellipse_x = np.linspace(
-        streaming_metrics["mean_latency"] - streaming_metrics["std_latency"],
-        streaming_metrics["mean_latency"] + streaming_metrics["std_latency"],
-        100
+        streaming_metrics["latency"].mean - std_latency,
+        streaming_metrics["latency"].mean + std_latency,
+        20
     )
-    ellipse_eq = 1 - (ellipse_x**2) / (streaming_metrics["std_latency"]**2)
-    ellipse_eq *= streaming_metrics["std_throughput"]**2
+    ellipse_y = np.sqrt(std_latency**2 - (ellipse_x - streaming_metrics["latency"].mean)**2)
+    ellipse_y *= std_throughput / std_latency
+    upper_ellipse = streaming_metrics["throughput"].mean + ellipse_y
+    lower_ellipse = streaming_metrics["throughput"].mean - ellipse_y
 
-    upper_ellipse = np.sqrt(ellipse_eq)
-    lower_ellipse = -np.sqrt(ellipse_eq)
     new_patch_data = {
         "x": np.concatenate([ellipse_x, ellipse_x[::-1]]),
         "y": np.concatenate([upper_ellipse, lower_ellipse[::-1]])
     }
-    patch_ds.data = new_patch_data
+    sources["patch"].data = new_patch_data
+
+    new_queue_data = sources["queue"].data.copy()
+    for i, buffer in enumerate(buffers):
+        qsize = buffer.pipe_out.conn_out.qsize()
+        if i == 0:
+            qsize /= (flags["fs"]*flags["clean_kernel"])
+        new_queue_data["xs"][i].append(streaming_metrics["batches"])
+        new_queue_data["ys"][i].append(qsize)
+        for axis in ["xs", "ys"]:
+            new_queue_data[axis][i] = new_queue_data[axis][i][-200:]
+    sources["queue"].data = new_queue_data
+
 
 
 def update_line():
@@ -134,8 +146,9 @@ def update_line():
     number of allowed points
     '''
     global data_streams
+    global sources
 
-    new_data = line_ds.data.copy()
+    new_data = sources["line"].data.copy()
     for y in ["pred", "target"]:
         count = len(new_data[y])
         if count >= SAMPLES_IN_LINE:
@@ -143,7 +156,7 @@ def update_line():
             # until we're the max amount under then extend
             num_over = count - SAMPLES_IN_LINE
             num_trim = num_over + NUM_SAMPLES_EXTEND
-            new_data[y] = new_data[y][amount_to_trim:]
+            new_data[y] = new_data[y][num_trim:]
 
         # avoid overflowing
         num_extend = min(NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE-count)
@@ -159,7 +172,7 @@ def update_line():
         new_data["x"].extend(range(count_x, count_x+num_extend))
 
     # update data source
-    line_ds.data = new_data
+    sources["line"].data = new_data
 
 
 def close_shop():
@@ -171,16 +184,27 @@ def close_shop():
 
 
 def application(doc):
+    # global sources
     p1 = figure(plot_height=400, plot_width=600)
-    p1.line("x", "pred", line_color="red", source=line_ds)
-    p1.line("x", "target", line_color="blue", source=line_ds)
+    p1.line("x", "pred", line_color="red", source=sources["line"], legend_label="Cleaned")
+    p1.line("x", "target", line_color="blue", source=sources["line"], legend_label="Raw")
 
-    p2 = figure(plot_height=400, plot_width=400)
-    p2.circle("x", "y", source=circ_ds)
-    p2.patch("x", "y", source=patch_ds)
+    p2 = figure(
+        plot_height=400,
+        plot_width=400,
+        y_axis_label="Throughput (Samples/s)",
+        x_axis_label="Latency(us)"
+    )
+    p2.circle("x", "y", source=sources["circle"])
+    p2.patch("x", "y", fill_alpha=0.4, source=sources["patch"])
 
-    doc.add_root(row(p1, p2))
-    doc.add_periodic_callback(update_line, _EXTEND/4)
+    p3 = figure(plot_height=400, plot_width=800, y_axis_label="Q Size", x_axis_label="Step")
+    p3.multi_line(xs="xs", ys="ys", line_color="color", legend_group="label", source=sources["queue"])
+
+    layout = row(p1, p2)
+    layout = column(layout, p3)
+    doc.add_root(layout)
+    doc.add_periodic_callback(update_line, NUM_SAMPLES_EXTEND/4)
     doc.add_periodic_callback(get_data, 100)
 
 
@@ -205,10 +229,7 @@ if __name__ == '__main__':
     buffers, out_pipe = build_simulation(flags)
     processes = [mp.Process(target=buffer) for buffer in buffers]
     try:
-        for process in processes:
-            process.start()
-        start_time = time.time()
-
+        start_time = None
         server.io_loop.add_callback(server.show, "/")
         server.io_loop.start()
 

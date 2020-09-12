@@ -4,6 +4,7 @@ import pickle
 import time
 from abc import abstractmethod
 from functools import partial
+from itertools import cycle
 
 import numpy as np
 from gwpy.timeseries import TimeSeriesDict
@@ -14,6 +15,27 @@ from tritongrpcclient import model_config_pb2 as model_config
 from tritonclientutils import triton_to_np_dtype
 
 
+
+class StreamingMetric:
+    def __init__(self, decay=None):
+        if decay is not None:
+            assert 0 < decay and decay <= 1
+        self.decay = decay
+        self.samples_seen = 0
+        self.mean = 0
+        self.var = 0
+
+    def update(self, measurement):
+        if self.samples_seen == 0:
+            self.mean = measurement
+        else:
+            decay = self.decay or 1./(samples_seen + 1)
+            delta = measurement - self.mean
+            self.mean += decay*delta
+            self.var = (1-decay)*(self.var + decay*delta**2)
+        self.samples_seen += 1
+
+        
 class MaxablePipe:
     '''
     Cheap wrapper object to be able to leverage the speed of
@@ -23,32 +45,43 @@ class MaxablePipe:
     can stop us from overloading the system memory
     '''
     def __init__(self, maxsize=None):
-        self.conn_in, self.conn_out = mp.Pipe(duplex=False)
+        # TODO: use queues for asynchronous sending and receiving
+        # self.conn_in, self.conn_out = mp.Pipe(duplex=False)
+        maxsize = int(maxsize) if maxsize is not None else None
+        q = mp.Queue(maxsize)
+        self.conn_in = q
+        self.conn_out = q
         self.maxsize = maxsize
         self._size = 0
 
     @property
     def full(self):
-        self._size >= self.maxsize
-
-    def put(self, x, timeout=None):
-        start_time = time.time()
-        while self.full:
-            if timeout is not None:
-                if time.time() - start_time >= timeout:
-                    raise RuntimeError
-        self.conn_out.send(x)
-        self._size += 1
+        return self._size >= self.maxsize
 
     def get(self):
-        x = self.conn_in.recv()
-        self._size -= 1
-        return x
+        return self.conn_in.get()
 
-    def close(self):
-        self.conn_in.close()
-        self.conn_out.close()
+    def put(self, x, timeout=None):
+        return self.conn_out.put(x, timeout=timeout)
 
+#     def put(self, x, timeout=None):
+#         start_time = time.time()
+#         while self.full:
+#             if timeout is not None:
+#                 if time.time() - start_time >= timeout:
+#                     raise RuntimeError
+#         self.conn_out.send(x)
+#         self._size += 1
+# 
+#     def get(self):
+#         x = self.conn_in.recv()
+#         self._size -= 1
+#         return x
+# 
+#     def close(self):
+#         self.conn_in.close()
+#         self.conn_out.close()
+# 
 
 class StoppableIteratingBuffer:
     '''
@@ -103,51 +136,28 @@ class StoppableIteratingBuffer:
         pass
 
 
-class DataGeneratorBuffer(StoppableIteratingBuffer):
-    def __init__(self, channels, t0, duration, fs, **kwargs):
-        self.data = TimeSeriesDict.get(
-            channels, t0, t0 + duration, nproc=4, allow_tape=True
-        )
-        self.data.resample(fs)
+def gwpy_data_generator(data, target_channel, duration, fs):
+    target = data.pop(target_channel).value
+    channels = list(data.keys())
+    data = np.stack([data[channel].value for channel in channels])
 
-        self.sleep_time = 1. / fs
-        self.target_channel = channels[0]
-        self.channels = sorted(channels[1:])
+    for idx in cycle(range(int(fs*duration))):
+        samples = {channel: x for channel, x in zip(channels, data[:, idx])}
+        yield samples, target[idx], idx
+
+
+class DataGeneratorBuffer(StoppableIteratingBuffer):
+    def __init__(self, data_generator, **kwargs):
+        self.data_generator = iter(data_generator)
         super().__init__(**kwargs)
 
-    def initialize_loop(self):
-        self.idx = 0
-        self.start_time = time.time()
-
-    @property
-    def generator_time(self):
-        '''
-        associate each sample with a time in real time that it
-        "should" have been sampled given the start time,
-        sample rate, and current_index
-        '''
-        return self.start_time + self.idx*self.sleep_time
-
     def loop(self):
-        samples = {}
-        for channel in self.channels:
-            samples[channel] = self.data[channel][self.idx].value
-
-        # TODO: do thread-based write of target here so
-        # that it can be read by plotting process with
-        # "true" time lag?
-        target = self.data[self.target_channel][self.idx].value
-
-        generation_time = self.generator_time
-        self.put((samples, target, generation_time))
-
-        # TODO: do some sort of padding rather than
-        # just doing wrapping? Would this even be
-        # handled here?
-        self.idx += 1
-        if self.idx == len(self.data[channel]):
-            self.start_time += self.idx*self.sleep_time
-            self.idx = 0
+        start_time = time.time()
+        samples, target, idx = next(self.data_generator)
+        self.put((samples, target))
+        end_time = time.time()
+        if idx % 2000 == 0:
+            print(end_time - start_time)
 
 
 class InputDataBuffer(StoppableIteratingBuffer):
@@ -180,6 +190,8 @@ class InputDataBuffer(StoppableIteratingBuffer):
         self.slices = slices
 
         self.channels = sorted(channels)
+        self.secs_per_sample = 1. / fs
+        self.time_since_last = None
 
         # load preprocessing info if there is any
         # since we only do bandpass on the target, I'll
@@ -195,10 +207,9 @@ class InputDataBuffer(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def initialize_loop(self):
+        self.time_since_last = time.time()
         for i in range(self.batch_overlap):
-            x, y, gen_time = self.read_sensor()
-            if i == 0:
-                self.batch_start_time = gen_time
+            x, y = self.read_sensor()
             self._data[:, i] = x
             self._target[i] = y
 
@@ -207,16 +218,17 @@ class InputDataBuffer(StoppableIteratingBuffer):
         read individual samples and return an array of size
         `(len(self.channels), 1)` for hstacking
         '''
-        samples, target, gen_time = self.get()
+        samples, target = self.get()
 
         # make sure that we don't "peek" ahead at
         # data that isn't supposed to exist yet
-        while time.time() < gen_time:
+        while (time.time() - self.time_since_last) < self.secs_per_sample:
             continue
+        self.time_since_last = time.time()
 
         samples = [samples[channel] for channel in self.channels]
         x = np.array(samples, dtype=np.float32)
-        return x, target, gen_time
+        return x, target
 
     def preprocess(self):
         '''
@@ -259,21 +271,20 @@ class InputDataBuffer(StoppableIteratingBuffer):
         # anyway?
         self._data[:, :self.batch_overlap] = self._data[:, -self.batch_overlap:]
         self._target[:self.batch_overlap] = self._target[-self.batch_overlap:]
-        self.batch_start_time += self.time_offset
 
     def loop(self):
         # start by reading the next batch of samples
         # TODO: play with numpy to see what's most efficient
         # concat and reshape? read_sensor()[:, None]?
         for i in range(self.batch_overlap, self._data.shape[1]):
-            x, y, gen_time = self.read_sensor()
+            x, y = self.read_sensor()
             self._data[:, i] = x
             self._target[i] = y
 
         data = self.preprocess()
         batch = self.make_batch(data)
         target = self._target.copy()
-        self.put((batch, target, self.batch_start_time))
+        self.put((batch, target))
 
         self.update()
 
@@ -315,11 +326,7 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         # assert model_metadata.versions[0] == model_version
 
         model_input = model_metadata.inputs[0]
-        # data_type_name = model_config.DataType.Name(model_input.datatype)
         data_type = model_input.datatype
-        # data_type = data_type_name.split("_", maxsplit=1)[1]
-        print(data_type)
-
         model_output = model_metadata.outputs[0]
 
         self.client_input = triton.InferInput(
@@ -333,10 +340,9 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def loop(self):
-        X, y, batch_gen_time = self.get()
-        callback=partial(
-            self.process_result, target=y, batch_gen_time=batch_gen_time)
-    
+        X, y = self.get()
+        callback=partial(self.process_result, target=y)
+ 
         self.client_input.set_data_from_numpy(X.astype('float32'))
         self.client.async_infer(
             model_name=self.model_name,
@@ -346,10 +352,10 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
             callback=callback
         )
     
-    def process_result(self, target, batch_gen_time, result, error):
+    def process_result(self, target, result, error):
         # TODO: add error checking
         prediction = result.as_numpy(self.client_output.name())
-        self.put((prediction, target, batch_gen_time))
+        self.put((prediction, target))
 
 
 class PostProcessBuffer(StoppableIteratingBuffer):
@@ -373,7 +379,7 @@ class PostProcessBuffer(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def loop(self):
-        prediction, target, batch_gen_time = self.get()
+        prediction, target = self.get()
 
         # TOO: include some sort of streaming calculation
         # to keep track of overlap between batches?
@@ -384,10 +390,9 @@ class PostProcessBuffer(StoppableIteratingBuffer):
         # measure latency from time at which first
         # frame ended
         completion_time = time.time()
-        batch_latency = int((completion_time - batch_gen_time)*10**6)
 
         # send everything back to main process for handling
-        self.put((prediction, target, batch_latency, completion_time))
+        self.put((prediction, target, completion_time))
 
 
 def build_simulation(flags):
@@ -409,13 +414,19 @@ def build_simulation(flags):
     # start with data generation process. This is meant to simulate
     # the functionality of the actual sensors from which data will
     # be read, and so wouldn't be used in a real pipeline
-    raw_data_buffer = DataGeneratorBuffer(
+    data = TimeSeriesDict.get(
         flags["chanslist"],
         flags["clean_t0"],
-        flags["clean_duration"],
-        flags["fs"],
-        pipe_out=raw_data_pipe
+        flags["clean_t0"]+flags["clean_duration"],
+        nproc=4,
+        allow_tape=True
     )
+    data.resample(flags["fs"])
+    data_generator = gwpy_data_generator(
+        data, flags["chanslist"][0], flags["clean_duration"], flags["fs"]
+    )
+
+    raw_data_buffer = DataGeneratorBuffer(data_generator, pipe_out=raw_data_pipe)
 
     # asynchronously read samples from data generation process,
     # accumulate a batch's worth, apply preprocessing, then
