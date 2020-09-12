@@ -17,7 +17,8 @@ from inference_sim import build_simulation, StreamingMetric
 from deepclean_prod import signal
 
 
-SAMPLES_IN_LINE = 10000
+SAMPLES_IN_LINE = 2000
+SUB_SAMPLE = 2
 NUM_SAMPLES_EXTEND = 800
 
 streaming_metrics = {
@@ -28,33 +29,6 @@ streaming_metrics = {
 data_streams = {
     "pred": np.array([]),
     "target": np.array([]) 
-}
-
-glyph_data = {
-    "line": {
-        "x": [],
-        "pred": [],
-        "target": []
-    },
-    "circle": {
-        "latency": [],
-        "throughput": [],
-        "label": []
-    },
-    "patches": {
-        "x": [],
-        "y": []
-    },
-    "queue": {
-        "xs": [[] for _ in range(4)],
-        "ys": [[] for _ in range(4)],
-        "color": palette,
-        "label": ["generate", "preproc", "inference", "postproc"]
-
-    }
-}
-sources = {
-    glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
 }
 
 
@@ -116,20 +90,22 @@ def get_data():
         streaming_metrics["latency"].mean + std_latency,
         20
     )
-    ellipse_y = np.sqrt(std_latency**2 - (ellipse_x - streaming_metrics["latency"].mean)**2)
+    ellipse_y = std_latency**2 - (ellipse_x - streaming_metrics["latency"].mean)**2
+    ellipse_y = np.clip(ellipse_y, 0, np.inf)
+    ellipse_y = np.sqrt(ellipse_y)
     ellipse_y *= std_throughput / std_latency
     upper_ellipse = streaming_metrics["throughput"].mean + ellipse_y
     lower_ellipse = streaming_metrics["throughput"].mean - ellipse_y
 
     new_patch_data = {
-        "x": np.concatenate([ellipse_x, ellipse_x[::-1]]),
-        "y": np.concatenate([upper_ellipse, lower_ellipse[::-1]])
+        "latency": np.concatenate([ellipse_x, ellipse_x[::-1]]),
+        "throughput": np.concatenate([upper_ellipse, lower_ellipse[::-1]])
     }
     sources["patch"].data = new_patch_data
 
     new_queue_data = sources["queue"].data.copy()
     for i, buffer in enumerate(buffers):
-        qsize = buffer.pipe_out.conn_out.qsize()
+        qsize = buffer.pipe_out.qsize()
         if i == 0:
             qsize /= (flags["fs"]*flags["clean_kernel"])
         new_queue_data["xs"][i].append(streaming_metrics["batches"])
@@ -184,21 +160,51 @@ def close_shop():
 
 
 def application(doc):
-    # global sources
-    p1 = figure(plot_height=400, plot_width=600)
+    p1 = figure(
+        title="Signal Trace",
+        plot_height=400,
+        plot_width=600,
+        tools=""
+    )
     p1.line("x", "pred", line_color="red", source=sources["line"], legend_label="Cleaned")
     p1.line("x", "target", line_color="blue", source=sources["line"], legend_label="Raw")
 
     p2 = figure(
+        title="Pipeline Throughput vs. Latency",
         plot_height=400,
         plot_width=400,
-        y_axis_label="Throughput (Samples/s)",
-        x_axis_label="Latency(us)"
+        y_axis_label="Throughput (Frames / s)",
+        x_axis_label="Latency (us)",
+        tools=""
     )
-    p2.circle("x", "y", source=sources["circle"])
-    p2.patch("x", "y", fill_alpha=0.4, source=sources["patch"])
+    p2.circle(
+        x="latency",
+        y="throughput",
+        fill_color="color",
+        fill_alpha=0.9,
+        line_color="color",
+        line_alpha=0.95,
+        legend_group="label",
+        source=sources["circle"]
+    )
+    p2.patches(
+        xs="latency",
+        ys="throughput",
+        fill_alpha=0.4,
+        fill_color="color",
+        line_alpha=0.9,
+        line_color="color",
+        legend_group="label",
+        source=sources["patches"]
+    )
 
-    p3 = figure(plot_height=400, plot_width=800, y_axis_label="Q Size", x_axis_label="Step")
+    p3 = figure(
+        title="Queue Size",
+        plot_height=400,
+        plot_width=900,
+        y_axis_label="Q Size",
+        x_axis_label="Step"
+    )
     p3.multi_line(xs="xs", ys="ys", line_color="color", legend_group="label", source=sources["queue"])
 
     layout = row(p1, p2)
@@ -228,6 +234,36 @@ if __name__ == '__main__':
 
     buffers, out_pipe = build_simulation(flags)
     processes = [mp.Process(target=buffer) for buffer in buffers]
+
+    glyph_data = {
+        "line": {
+            "x": [],
+            "pred": [],
+            "target": []
+        },
+        "circle": {
+            "latency": [0],
+            "throughput": [0],
+            "label": ["1"] # TODO: make number of concurrent models
+            "color": ["#65a1c2"]
+        },
+        "patches": {
+            "latency": [[]],
+            "throughput": [[]],
+            "color": ["#65a1c2"],
+            "label": ["1"]
+        },
+        "queue": {
+            "xs": [[] for _ in range(4)],
+            "ys": [[] for _ in range(4)],
+            "color": palette,
+            "label": ["generate", "preproc", "inference", "postproc"]
+
+        }
+    }
+    sources = {
+        glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
+    }
     try:
         start_time = None
         server.io_loop.add_callback(server.show, "/")

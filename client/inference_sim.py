@@ -36,33 +36,33 @@ class StreamingMetric:
         self.samples_seen += 1
 
         
-class MaxablePipe:
-    '''
-    Cheap wrapper object to be able to leverage the speed of
-    pipes but while keeping loose track of how much data is
-    being put into queues. Just in case the data generation
-    process gets way ahead of the rest of the pipeline, this
-    can stop us from overloading the system memory
-    '''
-    def __init__(self, maxsize=None):
-        # TODO: use queues for asynchronous sending and receiving
-        # self.conn_in, self.conn_out = mp.Pipe(duplex=False)
-        maxsize = int(maxsize) if maxsize is not None else None
-        q = mp.Queue(maxsize)
-        self.conn_in = q
-        self.conn_out = q
-        self.maxsize = maxsize
-        self._size = 0
+# class MaxablePipe:
+#     '''
+#     Cheap wrapper object to be able to leverage the speed of
+#     pipes but while keeping loose track of how much data is
+#     being put into queues. Just in case the data generation
+#     process gets way ahead of the rest of the pipeline, this
+#     can stop us from overloading the system memory
+#     '''
+#     def __init__(self, maxsize=None):
+#         # TODO: use queues for asynchronous sending and receiving
+#         # self.conn_in, self.conn_out = mp.Pipe(duplex=False)
+#         maxsize = int(maxsize) if maxsize is not None else None
+#         q = mp.Queue(maxsize)
+#         self.conn_in = q
+#         self.conn_out = q
+#         self.maxsize = maxsize
+#         self._size = 0
 
-    @property
-    def full(self):
-        return self._size >= self.maxsize
+#     @property
+#     def full(self):
+#         return self._size >= self.maxsize
 
-    def get(self):
-        return self.conn_in.get()
+#     def get(self):
+#         return self.conn_in.get()
 
-    def put(self, x, timeout=None):
-        return self.conn_out.put(x, timeout=timeout)
+#     def put(self, x, timeout=None):
+#         return self.conn_out.put(x, timeout=timeout)
 
 #     def put(self, x, timeout=None):
 #         start_time = time.time()
@@ -402,10 +402,10 @@ def build_simulation(flags):
     )
     max_num_batches = 1000
 
-    raw_data_pipe = MaxablePipe(maxsize=max_num_batches*num_samples_per_batch)
-    preproc_pipe = MaxablePipe(maxsize=max_num_batches)
-    infer_pipe = MaxablePipe(maxsize=max_num_batches)
-    results_pipe = MaxablePipe(maxsize=max_num_batches)
+    raw_data_pipe = mp.Queue(maxsize=int(max_num_batches*num_samples_per_batch))
+    preproc_pipe = mp.Queue(maxsize=max_num_batches)
+    infer_pipe = mp.Queue(maxsize=max_num_batches)
+    results_pipe = mp.Queue(maxsize=max_num_batches)
 
     # pass pipes to iterating buffers to create separate processes
     # for each step in the pipeline. We'll do viz writing in
@@ -425,7 +425,6 @@ def build_simulation(flags):
     data_generator = gwpy_data_generator(
         data, flags["chanslist"][0], flags["clean_duration"], flags["fs"]
     )
-
     raw_data_buffer = DataGeneratorBuffer(data_generator, pipe_out=raw_data_pipe)
 
     # asynchronously read samples from data generation process,
