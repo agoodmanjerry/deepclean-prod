@@ -100,7 +100,7 @@ class StoppableIteratingBuffer:
     def put(self, x, timeout=None):
         if self.pipe_out is None:
             raise ValueError("Nowhere to put!")
-        self.pipe_out.put(x, timeout)
+        self.pipe_out.put(x, timeout=timeout)
 
     def get(self):
         if self.pipe_in is None:
@@ -152,12 +152,8 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def loop(self):
-        start_time = time.time()
         samples, target, idx = next(self.data_generator)
         self.put((samples, target))
-        end_time = time.time()
-        if idx % 2000 == 0:
-            print(end_time - start_time)
 
 
 class InputDataBuffer(StoppableIteratingBuffer):

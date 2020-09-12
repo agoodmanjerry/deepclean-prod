@@ -56,12 +56,13 @@ def get_data():
 
     # we'll measure latency from the *last sample* of the *first frame*
     # we can calculate this time as:
-    # start_time
+    #     start_time
     time_sample_generated = start_time
     #     plus time delta to the start of this batch
     time_sample_generated += flags["clean_stride"]*(samples_seen - 1)
     #     plus the length of time of a single frame
     time_sample_generated += flags["clean_kernel"]
+    print(time_sample_generated)
 
     latency = output_tstamp - time_sample_generated
     latency = int(latency*10**6)
@@ -78,11 +79,6 @@ def get_data():
     data_streams["target"] = np.concatenate([data_streams["target"], target])
 
     # update our throughput/latency plots
-    new_circle_data = sources["circle"].data.copy()
-    for metric_name, metric in streaming_metrics.items():
-        [metric_name][-1] = metric.mean
-    sources["circle"].data = new_circle_data
-
     std_latency = max(np.sqrt(streaming_metrics["latency"].var), 1e-9)
     std_throughput = np.sqrt(streaming_metrics["throughput"].var)
     ellipse_x = np.linspace(
@@ -97,18 +93,25 @@ def get_data():
     upper_ellipse = streaming_metrics["throughput"].mean + ellipse_y
     lower_ellipse = streaming_metrics["throughput"].mean - ellipse_y
 
-    new_patch_data = {
-        "latency": np.concatenate([ellipse_x, ellipse_x[::-1]]),
-        "throughput": np.concatenate([upper_ellipse, lower_ellipse[::-1]])
+    new_data = {
+        "circle": {
+            metric_name: metric.mean for metric_name, metric in streaming_metrics.items()
+        },
+        "patches": {
+            "latency": np.concatenate([ellipse_x, ellipse_x[::-1]]),
+            "throughput": np.concatenate([upper_ellipse, lower_ellipse[::-1]])
+        }
     }
-    sources["patch"].data = new_patch_data
+    for source_name, data in new_data.items():
+        for metric_name, x in data.items():
+            values = sources[source_name].data[metric_name]
+            values[-1] = x
+            sources[source_name].data[metric_name] = values
 
     new_queue_data = sources["queue"].data.copy()
-    for i, buffer in enumerate(buffers):
+    for i, buffer in enumerate(buffers[1:]):
         qsize = buffer.pipe_out.qsize()
-        if i == 0:
-            qsize /= (flags["fs"]*flags["clean_kernel"])
-        new_queue_data["xs"][i].append(streaming_metrics["batches"])
+        new_queue_data["xs"][i].append(batches)
         new_queue_data["ys"][i].append(qsize)
         for axis in ["xs", "ys"]:
             new_queue_data[axis][i] = new_queue_data[axis][i][-200:]
@@ -133,6 +136,7 @@ def update_line():
             num_over = count - SAMPLES_IN_LINE
             num_trim = num_over + NUM_SAMPLES_EXTEND
             new_data[y] = new_data[y][num_trim:]
+            count = len(new_data[y])
 
         # avoid overflowing
         num_extend = min(NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE-count)
@@ -210,8 +214,8 @@ def application(doc):
     layout = row(p1, p2)
     layout = column(layout, p3)
     doc.add_root(layout)
-    doc.add_periodic_callback(update_line, NUM_SAMPLES_EXTEND/4)
-    doc.add_periodic_callback(get_data, 100)
+    doc.add_periodic_callback(update_line, 40)
+    doc.add_periodic_callback(get_data, 20)
 
 
 server = Server({'/': application})
@@ -244,7 +248,7 @@ if __name__ == '__main__':
         "circle": {
             "latency": [0],
             "throughput": [0],
-            "label": ["1"] # TODO: make number of concurrent models
+            "label": ["1"], # TODO: make number of concurrent models
             "color": ["#65a1c2"]
         },
         "patches": {
@@ -254,10 +258,10 @@ if __name__ == '__main__':
             "label": ["1"]
         },
         "queue": {
-            "xs": [[] for _ in range(4)],
-            "ys": [[] for _ in range(4)],
-            "color": palette,
-            "label": ["generate", "preproc", "inference", "postproc"]
+            "xs": [[] for _ in range(3)],
+            "ys": [[] for _ in range(3)],
+            "color": palette[:3],
+            "label": ["preproc", "inference", "postproc"]
 
         }
     }
