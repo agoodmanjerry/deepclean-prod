@@ -5,6 +5,7 @@ import time
 from abc import abstractmethod
 from functools import partial
 from itertools import cycle
+from collections import defaultdict
 
 import numpy as np
 from gwpy.timeseries import TimeSeriesDict
@@ -35,53 +36,17 @@ class StreamingMetric:
             self.var = (1-decay)*(self.var + decay*delta**2)
         self.samples_seen += 1
 
-        
-# class MaxablePipe:
-#     '''
-#     Cheap wrapper object to be able to leverage the speed of
-#     pipes but while keeping loose track of how much data is
-#     being put into queues. Just in case the data generation
-#     process gets way ahead of the rest of the pipeline, this
-#     can stop us from overloading the system memory
-#     '''
-#     def __init__(self, maxsize=None):
-#         # TODO: use queues for asynchronous sending and receiving
-#         # self.conn_in, self.conn_out = mp.Pipe(duplex=False)
-#         maxsize = int(maxsize) if maxsize is not None else None
-#         q = mp.Queue(maxsize)
-#         self.conn_in = q
-#         self.conn_out = q
-#         self.maxsize = maxsize
-#         self._size = 0
 
-#     @property
-#     def full(self):
-#         return self._size >= self.maxsize
+def streaming_func_timer(f):
+    def wrapper(self, *args, **kwargs):
+        start_time = time.time()
+        stuff = f(self, *args, **kwargs)
+        end_time = time.time()
 
-#     def get(self):
-#         return self.conn_in.get()
+        self._time_dict[f.__name__].update(end_time-start_time)
+        return stuff
+    return wrapper
 
-#     def put(self, x, timeout=None):
-#         return self.conn_out.put(x, timeout=timeout)
-
-#     def put(self, x, timeout=None):
-#         start_time = time.time()
-#         while self.full:
-#             if timeout is not None:
-#                 if time.time() - start_time >= timeout:
-#                     raise RuntimeError
-#         self.conn_out.send(x)
-#         self._size += 1
-# 
-#     def get(self):
-#         x = self.conn_in.recv()
-#         self._size -= 1
-#         return x
-# 
-#     def close(self):
-#         self.conn_in.close()
-#         self.conn_out.close()
-# 
 
 class StoppableIteratingBuffer:
     '''
@@ -92,9 +57,11 @@ class StoppableIteratingBuffer:
     adds methods for putting data in and pulling it out from
     connective pipes between processes
     '''
+    _LATENCY_WHITELIST = []
     def __init__(self, pipe_in=None, pipe_out=None):
         self.pipe_in = pipe_in
         self.pipe_out = pipe_out
+        self._time_dict = defaultdict(StreamingMetric)
         self._stop_event = mp.Event()
 
     def put(self, x, timeout=None):
@@ -135,6 +102,18 @@ class StoppableIteratingBuffer:
     def cleanup(self):
         pass
 
+    @property
+    def latencies(self):
+        return {func: l.mean for func, l in self._time_dict.items()}
+
+    @property
+    def latency(self):
+        latency = 0
+        for func, l in self.latencies.items():
+            if func not in self._LATENCY_WHITELIST:
+                latency += l
+        return latency
+
 
 def gwpy_data_generator(data, target_channel, duration, fs):
     target = data.pop(target_channel).value
@@ -157,6 +136,8 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
 
 
 class InputDataBuffer(StoppableIteratingBuffer):
+    _LATENCY_WHITELIST = ["update"]
+
     def __init__(self,
             batch_size,
             channels,
@@ -175,7 +156,6 @@ class InputDataBuffer(StoppableIteratingBuffer):
         self._target = np.empty((num_samples,))
     
         self.batch_overlap = int(num_samples - fs*kernel_stride*batch_size)
-        self.time_offset = kernel_stride*batch_size
 
         # tells us how to window a 2D stream of data into a 3D batch
         slices = []
@@ -208,6 +188,10 @@ class InputDataBuffer(StoppableIteratingBuffer):
             x, y = self.read_sensor()
             self._data[:, i] = x
             self._target[i] = y
+
+            # set the start time at the end of the first batch
+            if i == self._batch.shape[2]:
+                self.batch_start_time = time.time()
 
     def read_sensor(self):
         '''
@@ -256,7 +240,8 @@ class InputDataBuffer(StoppableIteratingBuffer):
         # we need to do a copy, which I think we do
         return self._batch
 
-    def update(self):
+    @streaming_func_timer
+    def reset(self):
         '''
         shift over all the data elements so that we can populate
         the leftovers with the next batch. Also update the
@@ -268,7 +253,8 @@ class InputDataBuffer(StoppableIteratingBuffer):
         self._data[:, :self.batch_overlap] = self._data[:, -self.batch_overlap:]
         self._target[:self.batch_overlap] = self._target[-self.batch_overlap:]
 
-    def loop(self):
+    @streaming_func_timer
+    def update(self):
         # start by reading the next batch of samples
         # TODO: play with numpy to see what's most efficient
         # concat and reshape? read_sensor()[:, None]?
@@ -277,12 +263,17 @@ class InputDataBuffer(StoppableIteratingBuffer):
             self._data[:, i] = x
             self._target[i] = y
 
+    @streaming_func_timer
+    def prepare(self):
         data = self.preprocess()
         batch = self.make_batch(data)
         target = self._target.copy()
         self.put((batch, target))
 
+    def loop(self):
         self.update()
+        self.prepare()
+        self.reset()
 
 
 class AsyncInferenceClient(StoppableIteratingBuffer):
@@ -353,6 +344,26 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         prediction = result.as_numpy(self.client_output.name())
         self.put((prediction, target))
 
+    @property
+    def latencies(self):
+        model_stats = self.client.get_inference_statistics().model_stats
+        for model_stat in model_stats:
+            if (
+                    model_stat.name == self.model_name and
+                    model_stat.version == self.model_version
+            ):
+                inference_stats = model_stat.inference_stats
+                break
+        else:
+            raise ValueError
+        count = inference_stats.success.count
+        steps = ["queue", "compute_input", "compute_infer", "compute_output"]
+        latencies = {}
+        for step in steps:
+            avg_time = getattr(inference_stats, step).ns / (10**9 * count)
+            latencies[step] = avg_time
+        return latencies
+
 
 class PostProcessBuffer(StoppableIteratingBuffer):
     def __init__(self, kernel_size, kernel_stride, fs, ppr_file, **kwargs):
@@ -374,17 +385,18 @@ class PostProcessBuffer(StoppableIteratingBuffer):
 
         super().__init__(**kwargs)
 
-    def loop(self):
-        prediction, target = self.get()
-
+    @streaming_func_timer
+    def postprocess(self, prediction):
         # TOO: include some sort of streaming calculation
         # to keep track of overlap between batches?
         prediction = self.overlap_add(prediction)
         prediction = self.uncenter(prediction)
         prediction = self.bandpass(prediction)
+        return prediction
 
-        # measure latency from time at which first
-        # frame ended
+    def loop(self):
+        prediction, target = self.get()
+        prediction = self.postprocess(prediction)
         completion_time = time.time()
 
         # send everything back to main process for handling

@@ -12,6 +12,7 @@ from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource
 from bokeh.server.server import Server
 from bokeh.palettes import Category10_4 as palette
+from bokeh.transforms import cumsum
 
 from inference_sim import build_simulation, StreamingMetric
 from deepclean_prod import signal
@@ -109,13 +110,21 @@ def get_data():
             sources[source_name].data[metric_name] = values
 
     new_queue_data = sources["queue"].data.copy()
+    new_pie_data = sources["pie"].data.copy()
     for i, buffer in enumerate(buffers[1:]):
         qsize = buffer.pipe_out.qsize()
         new_queue_data["xs"][i].append(batches)
         new_queue_data["ys"][i].append(qsize)
         for axis in ["xs", "ys"]:
             new_queue_data[axis][i] = new_queue_data[axis][i][-200:]
+
+        new_pie_data["value"][i] = int(buffer.latency*10**6)
+
+    total_latency = sum(new_pie_data["value"])
+    new_pie_data["angle"] = [v*2*np.pi / total_latency for v in new_pie_data["value"]]
+
     sources["queue"].data = new_queue_data
+    sources["pie"].data = new_pie_data
 
 
 
@@ -203,16 +212,35 @@ def application(doc):
     )
 
     p3 = figure(
+        title="Latency Breakdown",
+        plot_height=400,
+        plot_Width=400
+        tools="",
+        tooltips=[("@label", "@value us")]
+    )
+    p3.wedge(
+        x=0,
+        y=1,
+        radius=0.4,
+        start_angle=cumsum("angle", include_zero=True),
+        end_angle=cumsum("angle"),
+        line_color="white",
+        fill_color="color",
+        legend_group="label",
+        source=sources["pie"]
+    )
+
+    p4 = figure(
         title="Queue Size",
         plot_height=400,
         plot_width=900,
         y_axis_label="Q Size",
         x_axis_label="Step"
     )
-    p3.multi_line(xs="xs", ys="ys", line_color="color", legend_group="label", source=sources["queue"])
+    p4.multi_line(xs="xs", ys="ys", line_color="color", legend_group="label", source=sources["queue"])
 
-    layout = row(p1, p2)
-    layout = column(layout, p3)
+    layout = row(p1, p2, p3)
+    layout = column(layout, p4)
     doc.add_root(layout)
     doc.add_periodic_callback(update_line, 40)
     doc.add_periodic_callback(get_data, 20)
@@ -262,7 +290,12 @@ if __name__ == '__main__':
             "ys": [[] for _ in range(3)],
             "color": palette[:3],
             "label": ["preproc", "inference", "postproc"]
-
+        },
+        "pie": {
+            "angle": [2*np.pi / 3 for _ in range(3)],
+            "value": [0 for _ in range(3)],
+            "color": palette[:3],
+            "label": ["preproc", "inference", "postproc"]
         }
     }
     sources = {
