@@ -1,10 +1,11 @@
+from collections import defaultdict
+from functools import partial
 import multiprocessing as mp
 import numpy as np
-import time
 import pickle
-from functools import partial
+import queue
 import sys
-sys.path.insert(0, "/opt/conda/pkgs/nds2-client-0.16.6-hd02d5f2_0/libexec/nds2-client/modules/nds2-1_6/")
+import time
 
 from bokeh.layouts import row, column
 from bokeh.io import curdoc
@@ -14,244 +15,287 @@ from bokeh.server.server import Server
 from bokeh.palettes import Category10_4 as palette
 from bokeh.transform import cumsum
 
+sys.path.insert(0, "/opt/conda/pkgs/nds2-client-0.16.6-hd02d5f2_0/libexec/nds2-client/modules/nds2-1_6/")
 from inference_sim import build_simulation, StreamingMetric
 from deepclean_prod import signal
 
 
+# TODO: include in flags and pass to app
 SAMPLES_IN_LINE = 2000
 SUB_SAMPLE = 2
 NUM_SAMPLES_EXTEND = 800
 
-streaming_metrics = {
-    "throughput": StreamingMetric(),
-    "latency": StreamingMetric()
-}
 
-data_streams = {
-    "pred": np.array([]),
-    "target": np.array([]) 
-}
+class VizApp:
+    def __init__(self, buffers, q, warm_up_batches=50):
+        self.buffers = buffers
+        self.q = q
 
+        self.streaming_metrics = defaultdict(StreamingMetric)
+        self.data_streams = defaultdict(np.array)
+        self.latency_breakdown = defaultdict(lambda : defaultdict(StreamingMetric))
 
-def get_data():
-    '''
-    get data from simulation pipe and update both
-    streaming tensors and latency/throughput estimates
-    '''
-    global data_streams
-    global streaming_metrics
-    global sources
-
-    global processes
-    for process in processes:
-        if not process.is_alive():
-            process.start()
-
-    # return model prediction, target channel,
-    # the timestamp at which processing was finished,
-    start_time = None
-    while start_time is None:
-        prediction, target, output_tstamp, start_time, batch_start_time = out_pipe.get()
-
-    batches = streaming_metrics["latency"].samples_seen + 1
-    samples_seen = batches*flags["batch_size"]
-
-    latency = output_tstamp - batch_start_time
-    streaming_metrics["latency"].update(latency)
-
-    throughput = samples_seen / (output_tstamp - start_time)
-    streaming_metrics["throughput"].update(throughput)
-
-    # append data to existing data stream
-    target = bandpass(target)
-    prediction = target - prediction
-
-    data_streams["pred"] = np.concatenate([data_streams["pred"], prediction])
-    data_streams["target"] = np.concatenate([data_streams["target"], target])
-
-    # update our throughput/latency plots
-    std_latency = max(np.sqrt(streaming_metrics["latency"].var), 1e-9)
-    std_throughput = np.sqrt(streaming_metrics["throughput"].var)
-    ellipse_x = np.linspace(
-        streaming_metrics["latency"].mean - std_latency,
-        streaming_metrics["latency"].mean + std_latency,
-        20
-    )
-    ellipse_y = std_latency**2 - (ellipse_x - streaming_metrics["latency"].mean)**2
-    ellipse_y = np.clip(ellipse_y, 0, np.inf)
-    ellipse_y = np.sqrt(ellipse_y)
-    ellipse_y *= std_throughput / std_latency
-    upper_ellipse = streaming_metrics["throughput"].mean + ellipse_y
-    lower_ellipse = streaming_metrics["throughput"].mean - ellipse_y
-
-    new_data = {
-        "circle": {
-            metric_name: metric.mean for metric_name, metric in streaming_metrics.items()
-        },
-        "patches": {
-            "latency": np.concatenate([ellipse_x, ellipse_x[::-1]]),
-            "throughput": np.concatenate([upper_ellipse, lower_ellipse[::-1]])
+        glyph_data = {
+            "line": {
+                "x": [],
+                "cleaned": [],
+                "raw": []
+            },
+            "circle": {
+                "latency": [0],
+                "throughput": [0],
+                "label": ["1"], # TODO: make number of concurrent models
+                "color": ["#65a1c2"]
+            },
+            "patches": {
+                "latency": [[]],
+                "throughput": [[]],
+                "color": ["#65a1c2"],
+                "label": ["1"]
+            },
+            "pie": {
+                "angle": [2*np.pi / len(buffers) for _ in range(len(buffers))],
+                "value": [0 for _ in range(len(buffers))],
+                "color": palette[:len(buffers)],
+                "label": [buff.__name__ for buff in buffers]
+            }
         }
-    }
-    for source_name, data in new_data.items():
-        for metric_name, x in data.items():
-            values = sources[source_name].data[metric_name]
-            values[-1] = x
-            sources[source_name].data[metric_name] = values
+        self.sources = {
+            glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
+        }
+        self.layout = None
+        self.start_time = None
+
+    def get_data(self):
+        '''
+        get data from simulation pipe and update both
+        streaming tensors and latency/throughput estimates
+        '''
+        num_iters = self.warm_up_batches if self.start_time is None else 1
+        for _ in range(num_iters):
+            prediction, target, output_tstamp, batch_start_time = self.q.get()
+        if self.start_time is None:
+            self.start_time = batch_start_time
+
+        # append data to existing data stream
+        # TODO: make bandpass in init
+        target = bandpass(target)
+        prediction = target - prediction
+
+        for stream, y in zip(["pred", "target"], [prediction, target]):
+            self.data_streams[stream] = self.data_streams[stream].append(y)
+
+        if len(self.data_streams["x"]) == 0:
+            last_x = self.start_time - 1/flags["fs"]
+        else:
+            last_x = self.data_streams["x"][-1]
+        new_x = last_x + np.arange(1, len(target)+1)/flags["fs"]
+        self.data_streams["x"] = self.data_streams["x"].append(new_x)
+
+        latency = int((output_tstamp - batch_start_time)*10**6)
+        self.streaming_metrics["latency"].update(latency)
+
+        # TODO: don't use flags, pass to __init__
+        batches = self.streaming_metrics["latency"].samples_seen
+        samples_seen = batches*flags["batch_size"]
+
+        # TODO: is there a better calc for this?
+        throughput = samples_seen / (output_tstamp - start_time)
+        streaming_metrics["throughput"].update(throughput)
+
+        # update our per-func latency breakdowns
+        for buff in self.buffers:
+            for i in range(20):
+                try:
+                    func, latency = buff.latency_q.get_nowait()
+                except queue.Empty:
+                    break
+                self.latency_breakdown[buff][func.__name__].update(latency)
+
+    def update_throughput_latency_plot(self):
+        mean_latency = self.streaming_metrics["latency"].mean
+        mean_throughput = self.streaming_metrics["throughput"].mean
+
+        std_latency = max(np.sqrt(self.streaming_metrics["latency"].var), 1e-9)
+        std_throughput = np.sqrt(self.streaming_metrics["throughput"].var)
+
+        ellipse_x = np.linspace(
+            mean_latency-std_latency, mean_latency+std_latency, 20
+        )
+        ellipse_y = std_latency**2 - (ellipse_x - mean_latency)**2
+        ellipse_y = np.clip(ellipse_y, 0, np.inf)
+        ellipse_y = np.sqrt(ellipse_y)
+        ellipse_y *= std_throughput / std_latency
+
+        upper_ellipse = mean_throughput + ellipse_y
+        lower_ellipse = mean_throughput - ellipse_y
+
+        new_data = {
+            "circle": {
+                "latency": mean_latency,
+                "throughput": mean_throughput
+            },
+            "patches": {
+                "latency": ellipse_x.append(ellipse_x[::-1]),
+                "throughput": upper_ellipse.append(lower_ellipse[::-1])
+            }
+        }
+        for source_name, data in new_data.items():
+            for metric_name, x in data.items():
+                values = self.sources[source_name].data[metric_name]
+                values[-1] = x
+                self.sources[source_name].data[metric_name] = values
 
 
-def update_buffers_and_latencies():
-    new_queue_data = sources["queue"].data.copy()
-    new_pie_data = sources["pie"].data.copy()
-    for i, buffer in enumerate(buffers[1:]):
-        qsize = buffer.pipe_out.qsize()
-        new_queue_data["xs"][i].append(streaming_metrics["latency"].samples_seen)
-        new_queue_data["ys"][i].append(qsize)
-        for axis in ["xs", "ys"]:
-            new_queue_data[axis][i] = new_queue_data[axis][i][-200:]
+    def update_latency_breakdown_plot(self):
+        new_pie_data = self.sources["pie"].data.copy()
+        for i, buff in enumerate(self.buffers):
+            latencies = self.latency_breakdown[buff]
+            latency = 0
+            for func_name, l in latencies.items():
+                if func_name not in buff._LATENCY_WHITELIST:
+                    latency += l.mean
+            new_pie_data["value"][i] = int(latency*10**6)
 
-        new_pie_data["value"][i] = int(buffer.latency*10**6)
+        total_latency = sum(new_pie_data["value"])
+        new_pie_data["angle"] = [v*2*np.pi / total_latency for v in new_pie_data["value"]]
+        self.sources["pie"].data = new_pie_data
 
-    total_latency = sum(new_pie_data["value"])
-    new_pie_data["angle"] = [v*2*np.pi / total_latency for v in new_pie_data["value"]]
+    def update_signal_trace_plot(self):
+        '''
+        update our line plots of data up to the maximum
+        number of allowed points
+        '''
+        new_data = self.sources["line"].data.copy()
+        for stream_name, stream in self.data_streams.items():
+            plotted_array = new_data[stream_name]
+            if len(plotted_array) >= SAMPLES_IN_LINE:
+                # if we're already at or over, cut back
+                # until we're the max amount under then extend
+                num_over = len(plotted_array) - SAMPLES_IN_LINE
+                num_trim = num_over + NUM_SAMPLES_EXTEND
+                plotted_array = plotted_array[num_trim:]
 
-    sources["queue"].data = new_queue_data
-    sources["pie"].data = new_pie_data
+            # avoid overflowing
+            num_extend = min(
+                NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE - len(plotted_array)
+            )
+            new_data[stream_name].extend(stream[:num_extend])
+            self.data_streams[stream_name] = stream[num_extend:]
 
+        # update data source
+        self.sources["line"].data = new_data
 
+    def build_layout(self):
+        p1 = figure(
+            title="Signal Trace",
+            plot_height=400,
+            plot_width=600,
+            toolbar_location=None
+        )
 
-def update_line():
-    '''
-    update our line plots of data up to the maximum
-    number of allowed points
-    '''
-    global data_streams
-    global sources
+        for y, color in zip(["cleaned", "raw"], palette):
+            p1.line(
+                "x",
+                y,
+                line_color=color,
+                line_alpha=0.8,
+                source=self.sources["line"],
+                legend_label=y.title()
+            )
 
-    new_data = sources["line"].data.copy()
-    for y in ["pred", "target"]:
-        count = len(new_data[y])
-        if count >= SAMPLES_IN_LINE:
-            # if we're already at or over, cut back
-            # until we're the max amount under then extend
-            num_over = count - SAMPLES_IN_LINE
-            num_trim = num_over + NUM_SAMPLES_EXTEND
-            new_data[y] = new_data[y][num_trim:]
-            count = len(new_data[y])
+        p2 = figure(
+            title="Pipeline Throughput vs. Latency",
+            plot_height=400,
+            plot_width=400,
+            y_axis_label="Throughput (Frames / s)",
+            x_axis_label="Latency (us)",
+            toolbar_location=None
+        )
+        p2.circle(
+            x="latency",
+            y="throughput",
+            fill_color="color",
+            fill_alpha=0.9,
+            line_color="color",
+            line_alpha=0.95,
+            legend_group="label",
+            source=self.sources["circle"]
+        )
+        p2.patches(
+            xs="latency",
+            ys="throughput",
+            fill_alpha=0.4,
+            fill_color="color",
+            line_alpha=0.9,
+            line_color="color",
+            legend_group="label",
+            source=self.sources["patches"]
+        )
 
-        # avoid overflowing
-        num_extend = min(NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE-count)
-        new_data[y].extend(data_streams[y][:num_extend])
-        data_streams[y] = data_streams[y][num_extend:]
+        p3 = figure(
+            title="Latency Breakdown",
+            plot_height=400,
+            plot_width=400,
+            tools="hover",
+            toolbar_location=None,
+            x_range=(-0.5, 1.0),
+            tooltips=[("@label", "@value us")]
+        )
+        p3.axis.visible = False
+        p3.axis.axis_label = None
+        p3.grid.grid_line_color=None
 
-    # treat x separately since once we have the number
-    # of samples that we want we can stop updating
-    # TODO: incorporate accurate time on x axis
-    count_x = len(new_data["x"])
-    if count_x <= SAMPLES_IN_LINE:
-        num_extend = min(NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE - count_x)
-        new_data["x"].extend(range(count_x, count_x+num_extend))
+        p3.wedge(
+            x=0,
+            y=1,
+            radius=0.6,
+            start_angle=cumsum("angle", include_zero=True),
+            end_angle=cumsum("angle"),
+            line_color="white",
+            fill_color="color",
+            legend_field="label",
+            source=self.sources["pie"]
+        )
 
-    # update data source
-    sources["line"].data = new_data
+        self.layout = row(p1, p2, p3)
 
+    def __call__(self, doc):
+        if self.layout is None:
+            self.build_layout()
+        doc.add_root(self.layout)
 
-def close_shop():
-    for buffer in buffers:
-        buffer.stop()
-    for process in processes:
-        if process.is_alive():
-            process.join()
+        # update our data frequently
+        doc.add_periodic_callback(get_data, 20)
 
+        # TODO: should the signal traces be updated
+        # at a representative cadence?
+        for attr in self.__dir__():
+            if re.match("update_.+_plot", attr):
+                func = getattr(self, attr)
+                doc.add_periodic_callback(func, 100)
 
-def application(doc):
-    p1 = figure(
-        title="Signal Trace",
-        plot_height=400,
-        plot_width=600,
-        tools=""
-    )
-    p1.line("x", "pred", line_color="red", source=sources["line"], legend_label="Cleaned")
-    p1.line("x", "target", line_color="blue", source=sources["line"], legend_label="Raw")
+    def close_shop(self, processes):
+        for buffer in self.buffers:
+            buffer.stop()
+        for process in processes:
+            if process.is_alive():
+                process.join()
 
-    p2 = figure(
-        title="Pipeline Throughput vs. Latency",
-        plot_height=400,
-        plot_width=400,
-        y_axis_label="Throughput (Frames / s)",
-        x_axis_label="Latency (us)",
-        tools=""
-    )
-    p2.circle(
-        x="latency",
-        y="throughput",
-        fill_color="color",
-        fill_alpha=0.9,
-        line_color="color",
-        line_alpha=0.95,
-        legend_group="label",
-        source=sources["circle"]
-    )
-    p2.patches(
-        xs="latency",
-        ys="throughput",
-        fill_alpha=0.4,
-        fill_color="color",
-        line_alpha=0.9,
-        line_color="color",
-        legend_group="label",
-        source=sources["patches"]
-    )
+    def run(self, server):
+        processes = []
+        for buff in buffers:
+            p = mp.Process(target=buff)
+            p.start()
+            processes.append(p)
 
-    p3 = figure(
-        title="Latency Breakdown",
-        plot_height=400,
-        plot_width=400,
-        tools="hover",
-        toolbar_location=None,
-        x_range=(-0.5, 1.0),
-        tooltips=[("@label", "@value us")]
-    )
-    p3.axis.visible = False
-    p3.axis.axis_label = None
-    p3.grid.grid_line_color=None
-    p3.wedge(
-        x=0,
-        y=1,
-        radius=0.4,
-        start_angle=cumsum("angle", include_zero=True),
-        end_angle=cumsum("angle"),
-        line_color="white",
-        fill_color="color",
-        legend_field="label",
-        source=sources["pie"]
-    )
+        try:
+            server.io_loop.add_callbak(server.show, "/")
+            server.io_loop.start()
+        except Exception as e:
+            self.close_shop(processes)
+            raise e
 
-    p4 = figure(
-        title="Queue Size",
-        plot_height=400,
-        plot_width=900,
-        y_axis_label="Q Size",
-        x_axis_label="Step"
-    )
-    p4.multi_line(
-        xs="xs",
-        ys="ys",
-        line_color="color",
-        legend_group="label",
-        source=sources["queue"]
-    )
-
-    layout = row(p1, p2, p3)
-    layout = column(layout, p4)
-    doc.add_root(layout)
-    doc.add_periodic_callback(update_line, 40)
-    doc.add_periodic_callback(get_data, 20)
-    doc.add_periodic_callback(update_buffers_and_latencies, 200)
-
-
-server = Server({'/': application})
-server.start()
 
 if __name__ == '__main__':
     from parse_utils import get_client_parser
@@ -269,46 +313,8 @@ if __name__ == '__main__':
         )
 
     buffers, out_pipe = build_simulation(flags)
-    processes = [mp.Process(target=buffer) for buffer in buffers]
+    application = VizApp(buffers, out_pipe)
 
-    glyph_data = {
-        "line": {
-            "x": [],
-            "pred": [],
-            "target": []
-        },
-        "circle": {
-            "latency": [0],
-            "throughput": [0],
-            "label": ["1"], # TODO: make number of concurrent models
-            "color": ["#65a1c2"]
-        },
-        "patches": {
-            "latency": [[]],
-            "throughput": [[]],
-            "color": ["#65a1c2"],
-            "label": ["1"]
-        },
-        "queue": {
-            "xs": [[] for _ in range(3)],
-            "ys": [[] for _ in range(3)],
-            "color": palette[:3],
-            "label": ["preproc", "inference", "postproc"]
-        },
-        "pie": {
-            "angle": [2*np.pi / 3 for _ in range(3)],
-            "value": [0 for _ in range(3)],
-            "color": palette[:3],
-            "label": ["preproc", "inference", "postproc"]
-        }
-    }
-    sources = {
-        glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
-    }
-    try:
-        server.io_loop.add_callback(server.show, "/")
-        server.io_loop.start()
-
-    except Exception as e:
-        close_shop()
-        raise e
+    server = Server({'/': application})
+    server.start()
+    app.run(server)

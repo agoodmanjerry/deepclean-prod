@@ -43,7 +43,7 @@ def streaming_func_timer(f):
         stuff = f(self, *args, **kwargs)
         end_time = time.time()
 
-        self._time_dict[f.__name__].update(end_time-start_time)
+        self.latency_q.put((f.__name__, end_time-start_time))
         return stuff
     return wrapper
 
@@ -58,21 +58,21 @@ class StoppableIteratingBuffer:
     connective pipes between processes
     '''
     _LATENCY_WHITELIST = []
-    def __init__(self, pipe_in=None, pipe_out=None):
-        self.pipe_in = pipe_in
-        self.pipe_out = pipe_out
-        self._time_dict = defaultdict(StreamingMetric)
+    def __init__(self, q_in=None, q_out=None):
+        self.q_in = q_in
+        self.q_out = q_out
+        self.latency_q = mp.Queue()
         self._stop_event = mp.Event()
 
     def put(self, x, timeout=None):
-        if self.pipe_out is None:
+        if self.q_out is None:
             raise ValueError("Nowhere to put!")
-        self.pipe_out.put(x, timeout=timeout)
+        self.q_out.put(x, timeout=timeout)
 
     def get(self):
-        if self.pipe_in is None:
+        if self.q_in is None:
             raise ValueError("Nowhere to get!")
-        return self.pipe_in.get()
+        return self.q_in.get()
 
     @property
     def stopped(self):
@@ -101,18 +101,6 @@ class StoppableIteratingBuffer:
 
     def cleanup(self):
         pass
-
-    @property
-    def latencies(self):
-        return {func: l.mean for func, l in self._time_dict.items()}
-
-    @property
-    def latency(self):
-        latency = 0
-        for func, l in self.latencies.items():
-            if func not in self._LATENCY_WHITELIST:
-                latency += l
-        return latency
 
 
 def gwpy_data_generator(data, target_channel, duration, fs):
@@ -168,10 +156,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
         self.channels = sorted(channels)
         self.secs_per_sample = 1. / fs
         self._last_sample_time = None
-
-        self._start_time = None
-        self._warm_up_batches = 50
-        self._batches = 0
+        self._batch_start_time = None
 
         # load preprocessing info if there is any
         if ppr_file is not None:
@@ -266,19 +251,13 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
             if i == self._batch.shape[2]:
                 self._batch_start_time = time.time()
-                if self._batches is not None and self._batches == self._warm_up_batches:
-                    self._start_time = time.time()
-                    self._batches = None
-
-        if self._batches is not None and self._batches < self._warm_up_batches:
-            self._batches += 1
 
     @streaming_func_timer
     def prepare(self):
         data = self.preprocess()
         batch = self.make_batch(data)
         target = self._target.copy()
-        self.put((batch, target, self._start_time, self._batch_start_time))
+        self.put((batch, target, self._batch_start_time))
 
     def loop(self):
         self.update()
@@ -336,10 +315,33 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         self.model_version = str(model_version)
         super().__init__(**kwargs)
 
+    @streaming_func_timer
+    def update_latencies(self):
+        model_stats = self.client.get_inference_statistics().model_stats
+        for model_stat in model_stats:
+            if (
+                    model_stat.name == self.model_name and
+                    model_stat.version == self.model_version
+            ):
+                inference_stats = model_stat.inference_stats
+                break
+        else:
+            raise ValueError
+        count = inference_stats.success.count
+        steps = ["queue", "compute_input", "compute_infer", "compute_output"]
+        latencies = {}
+        for step in steps:
+            avg_time = getattr(inference_stats, step).ns / (10**9 * count)
+            self.latency_q.put((step, avg_time))
+
     def loop(self):
-        X, y, start_time, batch_start_time = self.get()
-        callback=partial(self.process_result, target=y, start_time=start_time, batch_start_time=batch_start_time)
+        X, y, batch_start_time = self.get()
+        callback=partial(
+            self.process_result, target=y, batch_start_time=batch_start_time
+        )
  
+        # TODO: is there a way to uniquely identify inference
+        # requests such that we can keep track of round trip latency?
         self.client_input.set_data_from_numpy(X.astype("float32"))
         self.client.async_infer(
             model_name=self.model_name,
@@ -348,32 +350,12 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
             outputs=[self.client_output],
             callback=callback
         )
+        self.update_latencies()
     
-    def process_result(self, target, start_time, batch_start_time, result, error):
+    def process_result(self, target, batch_start_time, result, error):
         # TODO: add error checking
         prediction = result.as_numpy(self.client_output.name())
-        self.put((prediction, target, start_time, batch_start_time))
-
-    @property
-    def latencies(self):
-#         model_stats = self.client.get_inference_statistics().model_stats
-#         for model_stat in model_stats:
-#             if (
-#                     model_stat.name == self.model_name and
-#                     model_stat.version == self.model_version
-#             ):
-#                 inference_stats = model_stat.inference_stats
-#                 break
-#         else:
-#             raise ValueError
-#         count = inference_stats.success.count
-#         steps = ["queue", "compute_input", "compute_infer", "compute_output"]
-#         latencies = {}
-#         for step in steps:
-#             avg_time = getattr(inference_stats, step).ns / (10**9 * count)
-#             latencies[step] = avg_time
-        latencies = {'queue': 0.003657636374689826, 'compute_input': 0.0005879989106699751, 'compute_infer': 0.001805268334987593, 'compute_output': 0.0003212587915632754}
-        return latencies
+        self.put((prediction, target, batch_start_time))
 
 
 class PostProcessBuffer(StoppableIteratingBuffer):
@@ -406,12 +388,15 @@ class PostProcessBuffer(StoppableIteratingBuffer):
         return prediction
 
     def loop(self):
-        prediction, target, start_time, batch_start_time = self.get()
+        prediction, target, batch_start_time = self.get()
         prediction = self.postprocess(prediction)
+
+        # measure completion time for throughput measurement
+        # here to be as accurate as possible
         completion_time = time.time()
 
         # send everything back to main process for handling
-        self.put((prediction, target, completion_time, start_time, batch_start_time))
+        self.put((prediction, target, completion_time, batch_start_time))
 
 
 def build_simulation(flags):
@@ -421,10 +406,10 @@ def build_simulation(flags):
     )
     max_num_batches = 1000
 
-    raw_data_pipe = mp.Queue(maxsize=int(max_num_batches*num_samples_per_batch))
-    preproc_pipe = mp.Queue(maxsize=max_num_batches)
-    infer_pipe = mp.Queue(maxsize=max_num_batches)
-    results_pipe = mp.Queue(maxsize=max_num_batches)
+    raw_data_q = mp.Queue(maxsize=int(max_num_batches*num_samples_per_batch))
+    preproc_q = mp.Queue(maxsize=max_num_batches)
+    infer_q = mp.Queue(maxsize=max_num_batches)
+    results_q = mp.Queue(maxsize=max_num_batches)
 
     # pass pipes to iterating buffers to create separate processes
     # for each step in the pipeline. We'll do viz writing in
@@ -444,7 +429,7 @@ def build_simulation(flags):
     data_generator = gwpy_data_generator(
         data, flags["chanslist"][0], flags["clean_duration"], flags["fs"]
     )
-    raw_data_buffer = DataGeneratorBuffer(data_generator, pipe_out=raw_data_pipe)
+    raw_data_buffer = DataGeneratorBuffer(data_generator, q_out=raw_data_q)
 
     # asynchronously read samples from data generation process,
     # accumulate a batch's worth, apply preprocessing, then
@@ -456,8 +441,8 @@ def build_simulation(flags):
         flags["clean_stride"],
         flags["fs"],
         flags["ppr_file"],
-        pipe_in=raw_data_pipe,
-        pipe_out=preproc_pipe
+        q_in=raw_data_q,
+        q_out=preproc_q
     )
 
     # asynchronously read preprocessed data and submit to
@@ -466,8 +451,8 @@ def build_simulation(flags):
         flags["url"],
         flags["model_name"],
         flags["model_version"],
-        pipe_in=preproc_pipe,
-        pipe_out=infer_pipe
+        q_in=preproc_q,
+        q_out=infer_q
     )
 
     # asynchronously receive outputs from triton and
@@ -478,8 +463,8 @@ def build_simulation(flags):
         flags["clean_stride"],
         flags["fs"],
         flags["ppr_file"],
-        pipe_in=infer_pipe,
-        pipe_out=results_pipe
+        q_in=infer_q,
+        q_out=results_q
     )
 
     buffers = [
@@ -488,5 +473,4 @@ def build_simulation(flags):
         client_buffer,
         postprocess_buffer
     ]
-    return buffers, results_pipe
-
+    return buffers, results_q
