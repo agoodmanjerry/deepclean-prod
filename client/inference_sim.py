@@ -331,6 +331,9 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         else:
             raise ValueError
         count = inference_stats.success.count
+        if count == 0:
+            return
+
         steps = ["queue", "compute_input", "compute_infer", "compute_output"]
         latencies = {}
         for step in steps:

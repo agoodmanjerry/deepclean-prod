@@ -4,6 +4,7 @@ import multiprocessing as mp
 import numpy as np
 import pickle
 import queue
+import re
 import sys
 import time
 
@@ -32,7 +33,7 @@ class VizApp:
         self.q = q
 
         self.streaming_metrics = defaultdict(StreamingMetric)
-        self.data_streams = defaultdict(np.array)
+        self.data_streams = defaultdict(lambda : np.array([]))
         self.latency_breakdown = defaultdict(lambda : defaultdict(StreamingMetric))
 
         glyph_data = {
@@ -63,6 +64,7 @@ class VizApp:
         self.sources = {
             glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
         }
+        self.warm_up_batches = warm_up_batches
         self.layout = None
         self.start_time = None
 
@@ -82,17 +84,17 @@ class VizApp:
         target = bandpass(target)
         prediction = target - prediction
 
-        for stream, y in zip(["pred", "target"], [prediction, target]):
-            self.data_streams[stream] = self.data_streams[stream].append(y)
+        for stream, y in zip(["cleaned", "raw"], [prediction, target]):
+            self.data_streams[stream] = np.append(self.data_streams[stream], y)
 
         if len(self.data_streams["x"]) == 0:
             last_x = self.start_time - 1/flags["fs"]
         else:
             last_x = self.data_streams["x"][-1]
         new_x = last_x + np.arange(1, len(target)+1)/flags["fs"]
-        self.data_streams["x"] = self.data_streams["x"].append(new_x)
+        self.data_streams["x"] = np.append(self.data_streams["x"], new_x)
 
-        latency = int((output_tstamp - batch_start_time)*10**6)
+        latency = int((output_tstamp - batch_start_time)*10**3)
         self.streaming_metrics["latency"].update(latency)
 
         # TODO: don't use flags, pass to __init__
@@ -100,8 +102,8 @@ class VizApp:
         samples_seen = batches*flags["batch_size"]
 
         # TODO: is there a better calc for this?
-        throughput = samples_seen / (output_tstamp - start_time)
-        streaming_metrics["throughput"].update(throughput)
+        throughput = samples_seen / (output_tstamp - self.start_time)
+        self.streaming_metrics["throughput"].update(throughput)
 
         # update our per-func latency breakdowns
         for buff in self.buffers:
@@ -110,7 +112,7 @@ class VizApp:
                     func, latency = buff.latency_q.get_nowait()
                 except queue.Empty:
                     break
-                self.latency_breakdown[buff][func.__name__].update(latency)
+                self.latency_breakdown[buff][func].update(latency)
 
     def update_throughput_latency_plot(self):
         mean_latency = self.streaming_metrics["latency"].mean
@@ -136,8 +138,8 @@ class VizApp:
                 "throughput": mean_throughput
             },
             "patches": {
-                "latency": ellipse_x.append(ellipse_x[::-1]),
-                "throughput": upper_ellipse.append(lower_ellipse[::-1])
+                "latency": np.append(ellipse_x, ellipse_x[::-1]),
+                "throughput": np.append(upper_ellipse, lower_ellipse[::-1])
             }
         }
         for source_name, data in new_data.items():
@@ -158,6 +160,9 @@ class VizApp:
             new_pie_data["value"][i] = int(latency*10**6)
 
         total_latency = sum(new_pie_data["value"])
+        if total_latency == 0:
+            return
+
         new_pie_data["angle"] = [v*2*np.pi / total_latency for v in new_pie_data["value"]]
         self.sources["pie"].data = new_pie_data
 
@@ -180,7 +185,8 @@ class VizApp:
             num_extend = min(
                 NUM_SAMPLES_EXTEND, SAMPLES_IN_LINE - len(plotted_array)
             )
-            new_data[stream_name].extend(stream[:num_extend])
+            plotted_array.extend(stream[:num_extend])
+            new_data[stream_name] = plotted_array
             self.data_streams[stream_name] = stream[num_extend:]
 
         # update data source
@@ -209,7 +215,7 @@ class VizApp:
             plot_height=400,
             plot_width=400,
             y_axis_label="Throughput (Frames / s)",
-            x_axis_label="Latency (us)",
+            x_axis_label="Latency (ms)",
             toolbar_location=None
         )
         p2.circle(
@@ -249,7 +255,7 @@ class VizApp:
         p3.wedge(
             x=0,
             y=1,
-            radius=0.6,
+            radius=0.5,
             start_angle=cumsum("angle", include_zero=True),
             end_angle=cumsum("angle"),
             line_color="white",
@@ -266,7 +272,7 @@ class VizApp:
         doc.add_root(self.layout)
 
         # update our data frequently
-        doc.add_periodic_callback(get_data, 20)
+        doc.add_periodic_callback(self.get_data, 20)
 
         # TODO: should the signal traces be updated
         # at a representative cadence?
@@ -290,7 +296,7 @@ class VizApp:
             processes.append(p)
 
         try:
-            server.io_loop.add_callbak(server.show, "/")
+            server.io_loop.add_callback(server.show, "/")
             server.io_loop.start()
         except Exception as e:
             self.close_shop(processes)
@@ -318,4 +324,5 @@ if __name__ == '__main__':
 
     server = Server({'/': application})
     server.start()
-    app.run(server, data_generator)
+    application.run(server, data_generator)
+
