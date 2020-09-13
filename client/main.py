@@ -282,9 +282,9 @@ class VizApp:
             if process.is_alive():
                 process.join()
 
-    def run(self, server):
+    def run(self, server, data_generator):
         processes = []
-        for buff in buffers:
+        for buff in [data_generator] + buffers:
             p = mp.Process(target=buff)
             p.start()
             processes.append(p)
@@ -313,8 +313,9 @@ if __name__ == '__main__':
         )
 
     buffers, out_pipe = build_simulation(flags)
+    data_generator = buffers.pop(0)
     application = VizApp(buffers, out_pipe)
 
     server = Server({'/': application})
     server.start()
-    app.run(server)
+    app.run(server, data_generator)

@@ -125,6 +125,7 @@ class DataGeneratorBuffer(StoppableIteratingBuffer):
 
 class InputDataBuffer(StoppableIteratingBuffer):
     _LATENCY_WHITELIST = ["update"]
+    __name__ = "Preprocessor"
 
     def __init__(self,
             batch_size,
@@ -266,6 +267,8 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
 
 class AsyncInferenceClient(StoppableIteratingBuffer):
+    __name__ = "Inference"
+
     def __init__(self, url, model_name, model_version, **kwargs):
         # set up server connection and check that server is active
         client = triton.InferenceServerClient(url)
@@ -359,6 +362,8 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
 
 
 class PostProcessBuffer(StoppableIteratingBuffer):
+    __name__ = "Postprocessor"
+
     def __init__(self, kernel_size, kernel_stride, fs, ppr_file, **kwargs):
         # TODO: should we do a check on the mean and std like we
         # do during preprocessing?
