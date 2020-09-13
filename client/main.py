@@ -12,7 +12,7 @@ from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource
 from bokeh.server.server import Server
 from bokeh.palettes import Category10_4 as palette
-from bokeh.transforms import cumsum
+from bokeh.transform import cumsum
 
 from inference_sim import build_simulation, StreamingMetric
 from deepclean_prod import signal
@@ -23,8 +23,8 @@ SUB_SAMPLE = 2
 NUM_SAMPLES_EXTEND = 800
 
 streaming_metrics = {
-    "throughput": StreamingMetric(0.95),
-    "latency": StreamingMetric(0.95)
+    "throughput": StreamingMetric(),
+    "latency": StreamingMetric()
 }
 
 data_streams = {
@@ -42,31 +42,21 @@ def get_data():
     global streaming_metrics
     global sources
 
-    global start_time
     global processes
-    if start_time is None:
-        start_time = time.time()
-        for process in processes:
+    for process in processes:
+        if not process.is_alive():
             process.start()
 
     # return model prediction, target channel,
     # the timestamp at which processing was finished,
-    prediction, target, output_tstamp = out_pipe.get()
+    start_time = None
+    while start_time is None:
+        prediction, target, output_tstamp, start_time, batch_start_time = out_pipe.get()
+
     batches = streaming_metrics["latency"].samples_seen + 1
     samples_seen = batches*flags["batch_size"]
 
-    # we'll measure latency from the *last sample* of the *first frame*
-    # we can calculate this time as:
-    #     start_time
-    time_sample_generated = start_time
-    #     plus time delta to the start of this batch
-    time_sample_generated += flags["clean_stride"]*(samples_seen - 1)
-    #     plus the length of time of a single frame
-    time_sample_generated += flags["clean_kernel"]
-    print(time_sample_generated)
-
-    latency = output_tstamp - time_sample_generated
-    latency = int(latency*10**6)
+    latency = output_tstamp - batch_start_time
     streaming_metrics["latency"].update(latency)
 
     throughput = samples_seen / (output_tstamp - start_time)
@@ -109,11 +99,13 @@ def get_data():
             values[-1] = x
             sources[source_name].data[metric_name] = values
 
+
+def update_buffers_and_latencies():
     new_queue_data = sources["queue"].data.copy()
     new_pie_data = sources["pie"].data.copy()
     for i, buffer in enumerate(buffers[1:]):
         qsize = buffer.pipe_out.qsize()
-        new_queue_data["xs"][i].append(batches)
+        new_queue_data["xs"][i].append(streaming_metrics["latency"].samples_seen)
         new_queue_data["ys"][i].append(qsize)
         for axis in ["xs", "ys"]:
             new_queue_data[axis][i] = new_queue_data[axis][i][-200:]
@@ -214,10 +206,15 @@ def application(doc):
     p3 = figure(
         title="Latency Breakdown",
         plot_height=400,
-        plot_Width=400
-        tools="",
+        plot_width=400,
+        tools="hover",
+        toolbar_location=None,
+        x_range=(-0.5, 1.0),
         tooltips=[("@label", "@value us")]
     )
+    p3.axis.visible = False
+    p3.axis.axis_label = None
+    p3.grid.grid_line_color=None
     p3.wedge(
         x=0,
         y=1,
@@ -226,7 +223,7 @@ def application(doc):
         end_angle=cumsum("angle"),
         line_color="white",
         fill_color="color",
-        legend_group="label",
+        legend_field="label",
         source=sources["pie"]
     )
 
@@ -237,13 +234,20 @@ def application(doc):
         y_axis_label="Q Size",
         x_axis_label="Step"
     )
-    p4.multi_line(xs="xs", ys="ys", line_color="color", legend_group="label", source=sources["queue"])
+    p4.multi_line(
+        xs="xs",
+        ys="ys",
+        line_color="color",
+        legend_group="label",
+        source=sources["queue"]
+    )
 
     layout = row(p1, p2, p3)
     layout = column(layout, p4)
     doc.add_root(layout)
     doc.add_periodic_callback(update_line, 40)
     doc.add_periodic_callback(get_data, 20)
+    doc.add_periodic_callback(update_buffers_and_latencies, 200)
 
 
 server = Server({'/': application})
@@ -302,7 +306,6 @@ if __name__ == '__main__':
         glyph: ColumnDataSource(data) for glyph, data in glyph_data.items()
     }
     try:
-        start_time = None
         server.io_loop.add_callback(server.show, "/")
         server.io_loop.start()
 

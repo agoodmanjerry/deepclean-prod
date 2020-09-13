@@ -30,7 +30,7 @@ class StreamingMetric:
         if self.samples_seen == 0:
             self.mean = measurement
         else:
-            decay = self.decay or 1./(samples_seen + 1)
+            decay = self.decay or 1./(self.samples_seen + 1)
             delta = measurement - self.mean
             self.mean += decay*delta
             self.var = (1-decay)*(self.var + decay*delta**2)
@@ -167,11 +167,13 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
         self.channels = sorted(channels)
         self.secs_per_sample = 1. / fs
-        self.time_since_last = None
+        self._last_sample_time = None
+
+        self._start_time = None
+        self._warm_up_batches = 50
+        self._batches = 0
 
         # load preprocessing info if there is any
-        # since we only do bandpass on the target, I'll
-        # ignore those params for now
         if ppr_file is not None:
             with open(ppr_file, "rb") as f:
                 ppr = pickle.load(f)
@@ -183,15 +185,16 @@ class InputDataBuffer(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def initialize_loop(self):
-        self.time_since_last = time.time()
+        self._last_sample_time = time.time()
         for i in range(self.batch_overlap):
             x, y = self.read_sensor()
             self._data[:, i] = x
             self._target[i] = y
 
-            # set the start time at the end of the first batch
-            if i == self._batch.shape[2]:
-                self.batch_start_time = time.time()
+    def maybe_wait(self):
+        while (time.time() - self._last_sample_time) < self.secs_per_sample:
+            continue
+        self._last_sample_time = time.time()
 
     def read_sensor(self):
         '''
@@ -202,9 +205,7 @@ class InputDataBuffer(StoppableIteratingBuffer):
 
         # make sure that we don't "peek" ahead at
         # data that isn't supposed to exist yet
-        while (time.time() - self.time_since_last) < self.secs_per_sample:
-            continue
-        self.time_since_last = time.time()
+        self.maybe_wait()
 
         samples = [samples[channel] for channel in self.channels]
         x = np.array(samples, dtype=np.float32)
@@ -263,12 +264,21 @@ class InputDataBuffer(StoppableIteratingBuffer):
             self._data[:, i] = x
             self._target[i] = y
 
+            if i == self._batch.shape[2]:
+                self._batch_start_time = time.time()
+                if self._batches is not None and self._batches == self._warm_up_batches:
+                    self._start_time = time.time()
+                    self._batches = None
+
+        if self._batches is not None and self._batches < self._warm_up_batches:
+            self._batches += 1
+
     @streaming_func_timer
     def prepare(self):
         data = self.preprocess()
         batch = self.make_batch(data)
         target = self._target.copy()
-        self.put((batch, target))
+        self.put((batch, target, self._start_time, self._batch_start_time))
 
     def loop(self):
         self.update()
@@ -327,10 +337,10 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
         super().__init__(**kwargs)
 
     def loop(self):
-        X, y = self.get()
-        callback=partial(self.process_result, target=y)
+        X, y, start_time, batch_start_time = self.get()
+        callback=partial(self.process_result, target=y, start_time=start_time, batch_start_time=batch_start_time)
  
-        self.client_input.set_data_from_numpy(X.astype('float32'))
+        self.client_input.set_data_from_numpy(X.astype("float32"))
         self.client.async_infer(
             model_name=self.model_name,
             model_version=self.model_version,
@@ -339,29 +349,30 @@ class AsyncInferenceClient(StoppableIteratingBuffer):
             callback=callback
         )
     
-    def process_result(self, target, result, error):
+    def process_result(self, target, start_time, batch_start_time, result, error):
         # TODO: add error checking
         prediction = result.as_numpy(self.client_output.name())
-        self.put((prediction, target))
+        self.put((prediction, target, start_time, batch_start_time))
 
     @property
     def latencies(self):
-        model_stats = self.client.get_inference_statistics().model_stats
-        for model_stat in model_stats:
-            if (
-                    model_stat.name == self.model_name and
-                    model_stat.version == self.model_version
-            ):
-                inference_stats = model_stat.inference_stats
-                break
-        else:
-            raise ValueError
-        count = inference_stats.success.count
-        steps = ["queue", "compute_input", "compute_infer", "compute_output"]
-        latencies = {}
-        for step in steps:
-            avg_time = getattr(inference_stats, step).ns / (10**9 * count)
-            latencies[step] = avg_time
+#         model_stats = self.client.get_inference_statistics().model_stats
+#         for model_stat in model_stats:
+#             if (
+#                     model_stat.name == self.model_name and
+#                     model_stat.version == self.model_version
+#             ):
+#                 inference_stats = model_stat.inference_stats
+#                 break
+#         else:
+#             raise ValueError
+#         count = inference_stats.success.count
+#         steps = ["queue", "compute_input", "compute_infer", "compute_output"]
+#         latencies = {}
+#         for step in steps:
+#             avg_time = getattr(inference_stats, step).ns / (10**9 * count)
+#             latencies[step] = avg_time
+        latencies = {'queue': 0.003657636374689826, 'compute_input': 0.0005879989106699751, 'compute_infer': 0.001805268334987593, 'compute_output': 0.0003212587915632754}
         return latencies
 
 
@@ -395,12 +406,12 @@ class PostProcessBuffer(StoppableIteratingBuffer):
         return prediction
 
     def loop(self):
-        prediction, target = self.get()
+        prediction, target, start_time, batch_start_time = self.get()
         prediction = self.postprocess(prediction)
         completion_time = time.time()
 
         # send everything back to main process for handling
-        self.put((prediction, target, completion_time))
+        self.put((prediction, target, completion_time, start_time, batch_start_time))
 
 
 def build_simulation(flags):
