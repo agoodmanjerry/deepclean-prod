@@ -85,7 +85,8 @@ data = dc.timeseries.TimeSeriesSegmentDataset(
     params.clean_kernel, params.clean_stride, params.pad_mode)
 
 download_data = True
-original_dataset_filename = os.path.join(params.out_dir, 'original.h5')
+original_dataset_filename = os.path.join(params.out_dir, 'original-{}-{}.h5'.format(
+    params.clean_t0, params.clean_duration))
 
 # Decide whether or not to download data
 if (params.clean_t0 is None) and (params.clean_duration is None):
@@ -170,7 +171,8 @@ clean = target - pred
 
 # Save clean data
 if params.out_file is None:
-    params.out_file = os.path.join(params.out_dir, 'clean.h5')
+    params.out_file = os.path.join(params.out_dir, 'clean-{}-{}.h5'.format(
+        params.clean_t0, params.clean_duration))
 else:
     params.out_file = os.path.join(params.out_dir, params.out_file)
     
