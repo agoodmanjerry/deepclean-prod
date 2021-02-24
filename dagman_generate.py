@@ -66,7 +66,7 @@ executable_train = os.path.join(os.path.dirname(sys.executable), 'dc-prod-train'
 executable_clean = os.path.join(os.path.dirname(sys.executable), 'dc-prod-clean')
 executable_summary = os.path.join(os.path.dirname(sys.executable), 'dc-prod-summary')
 
-for seg in segment_data:
+for i_train, seg in enumerate(segment_data):
     
     # Get training/cleaning time
     train_t0, train_t1, clean_t0, clean_t1 = seg.astype(int)
@@ -85,7 +85,7 @@ for seg in segment_data:
     train_args = io.dict2args(train_config)
     
     job_train = Job(
-        name='train_{}'.format(job_name),
+        name='train_{}_{}'.format(job_name, i_train),
         executable=executable_train,
         submit=submit,
         log=log,
@@ -119,7 +119,7 @@ for seg in segment_data:
         clean_args = io.dict2args(clean_config)
         
         job_clean = Job(
-            name='clean_{}'.format(job_name),
+            name='clean_{}_{}_{}'.format(job_name, i_train, i),
             executable=executable_clean,
             submit=submit,
             log=log, 
