@@ -243,13 +243,15 @@ for seg in segment_data:
     train_arg = get_train_ARGS (config, train_config)
 
     # dag entry for the training job 
-    cmd_job_train =  '''JOB {} {}'''.format(train_job, os.path.join(out_dir_submit, train_submit_filename))
-    cmd_var_train  = '''VARS {} ARGS="{}" ID="{:d}" '''.format(train_job, train_arg, dag_id)
+    cmd_job_train   =  '''JOB {} {}'''.format(train_job, os.path.join(out_dir_submit, train_submit_filename))
+    cmd_retry_train = '''RETRY {} {:d}'''.format(train_job, 10)
+    cmd_var_train   = '''VARS {} ARGS="{}" ID="{:d}" '''.format(train_job, train_arg, dag_id)
 
     dag_script += "\n\n#Jobs for data between GPS times {:d} and {:d}\n".format(clean_t0, clean_t1)
     dag_script += "#----------------------------------------------------------------------\n"
-    dag_script += cmd_job_train + '\n' 
-    dag_script += cmd_var_train + '\n\n' 
+    dag_script += cmd_job_train   + '\n' 
+    dag_script += cmd_retry_train + '\n' 
+    dag_script += cmd_var_train   + '\n\n' 
     
     # Set up cleaning jobs (could be more than 1)
     clean_config = {}
@@ -274,11 +276,14 @@ for seg in segment_data:
         # generate argument string for cleaning job
         clean_arg = get_clean_ARGS (config, clean_config)
         
-        cmd_job_clean = '''JOB {} {}'''.format(clean_job_i, os.path.join(out_dir_submit, clean_submit_filename))
-        cmd_var_clean = '''VARS {} ARGS="{}" ID="{:d}_{:d}" '''.format(clean_job_i, clean_arg, dag_id, i)
+        cmd_job_clean   = '''JOB {} {}'''.format(clean_job_i, os.path.join(out_dir_submit, clean_submit_filename))
+        cmd_retry_clean = '''RETRY {} {:d}'''.format(clean_job_i, 5)
 
-        dag_script += cmd_job_clean + '\n'
-        dag_script += cmd_var_clean + '\n\n'
+        cmd_var_clean   = '''VARS {} ARGS="{}" ID="{:d}_{:d}" '''.format(clean_job_i, clean_arg, dag_id, i)
+
+        dag_script += cmd_job_clean   + '\n'
+        dag_script += cmd_retry_clean + '\n'
+        dag_script += cmd_var_clean   + '\n\n'
     
         interjob_dependence += 'Parent '+train_job+ ' Child '+clean_job_i + '\n'
         
@@ -309,5 +314,6 @@ if params.submit:
 else:
     print ('Dag generated successfully . .\n')
     print ('To submit the dag, run the following command from terminal:\n\t{}\n'.format(cmd_dag_submit))
+
 
 
