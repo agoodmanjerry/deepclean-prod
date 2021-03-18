@@ -1,7 +1,7 @@
-numpy>=1.11
-scipy>=0.16.0
-matplotlib>=1.4.1
-gwpy
-torchsummary
-torch==1.0.0
-torchvision
+# numpy>=1.11
+# scipy>=0.16.0
+# matplotlib>=1.4.1
+# gwpy
+# torchsummary
+# torch==1.0.0
+# torchvision
