@@ -106,7 +106,7 @@ def get_train_ARGS (config, train_duration):
     arg += config['filt_fl'] 
 
     arg += " --filt-fh " 
-    arg += config['filt_fl'] 
+    arg += config['filt_fh'] 
 
     arg += " --filt-order " 
     arg += config['filt_order'] 
