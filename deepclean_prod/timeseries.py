@@ -1,4 +1,5 @@
 
+import glob
 import h5py
 import copy
 from collections import OrderedDict
@@ -7,6 +8,7 @@ import numpy as np
 
 import torch
 
+from gwpy.timeseries import TimeSeries
 from gwpy.timeseries import TimeSeriesDict
 
 from .signal import bandpass
@@ -31,8 +33,15 @@ class TimeSeriesDataset:
         target_channel = channels[0]
         
         # get data and resample
-        data = TimeSeriesDict.get(channels, t0, t0 + duration, nproc=nproc,
-                                  allow_tape=True)
+        #data = TimeSeriesDict.get(channels, t0, t0 + duration, nproc=nproc, allow_tape=True)
+        data = TimeSeriesDict.read(
+            '/home/chiajui.chou/dc_training/dc_KAGRA/frame_files/K1-O4.gwf',
+            channels,
+            t0,
+            t0 + duration,
+            nproc=nproc,
+        )
+
         data = data.resample(fs)
         
         # sorted by channel name
