@@ -120,10 +120,13 @@ class PSDLoss(nn.Module):
         # Calculate the PSD of the residual and the target
         psd_res = self.welch(target - pred)
         psd_target = self.welch(target)
+        # print(f'0 in target?: {torch.isinf(1/target).reshape(-1).sum()}')
+        # print(f'0 in psd_target?: {torch.isinf(1/psd_target).reshape(-1).sum()}')
         psd_res[:, ~self.mask] = 0.
 
         # psd loss is the integration over all frequencies
-        psd_ratio = psd_res/psd_target
+        # psd_ratio = psd_res/psd_target
+        psd_ratio = psd_res/(psd_target + 1e-13)
         asd_ratio = torch.sqrt(psd_ratio)
             
         if self.asd:
