@@ -2,6 +2,7 @@
 
 import os
 import copy
+import h5py
 import pickle
 import argparse
 import logging
@@ -14,6 +15,7 @@ import deepclean_prod as dc
 from deepclean_prod import config
 
 from gwpy.timeseries import TimeSeries
+from gwpy.timeseries import TimeSeriesDict
 
 # Default tensor type
 torch.set_default_tensor_type(torch.FloatTensor)
@@ -25,6 +27,7 @@ def parse_cmd():
         prog=os.path.basename(__file__), usage='%(prog)s [options]')
     
     # Dataset arguments
+    parser.add_argument('--clean-source', help='Path to the source to load data', type=str)
     parser.add_argument('--clean-t0', help='GPS of the first sample', type=int)
     parser.add_argument('--clean-duration', help='Duration of frame', type=int)
     parser.add_argument('--chanslist', help='Path to channel list', type=str)
@@ -91,6 +94,13 @@ if (params.clean_t0 is None) and (params.clean_duration is None):
 elif params.load_dataset:
     logging.info('Fetching dataset from output directory: {}'.format(params.out_dir))
     data.read(os.path.join(params.out_dir, 'raw.h5'), params.chanslist)
+elif (params.clean_source is not None) and (params.clean_t0 is not None):
+    logging.info('Loading raw data from {} .. {} from the source {}'.format(params.clean_t0, params.clean_t0 + params.clean_duration, params.clean_source))
+    data.load_from_source(params.chanslist, params.clean_source, params.clean_t0, params.clean_duration, params.fs)
+
+    # Save training/validation data if enabled
+    if params.save_dataset:
+        data.write(os.path.join(params.out_dir, 'raw.h5'))
 else:
     logging.info('Fetching raw data from {} .. {}'.format(
         params.clean_t0, params.clean_t0 + params.clean_duration))
@@ -140,12 +150,12 @@ pred_batches = dc.nn.utils.evaluate(data_loader, model, device=device)
 # post-processing the prediction
 # overlap-add to join together prediction
 noverlap = int((preprocessed.kernel - preprocessed.stride) * preprocessed.fs)
-pred = dc.signal.overlap_add(pred_batches, noverlap, params.window)
+pred = dc.dc_signal.overlap_add(pred_batches, noverlap, params.window)
 # convert back to unit of target
 pred *= std[preprocessed.target_idx].ravel()
 pred += mean[preprocessed.target_idx].ravel()
 # apply bandpass filter
-pred = dc.signal.filter_add(pred, preprocessed.fs, filt_fl, filt_fh, filt_order)
+pred = dc.dc_signal.filter_add(pred, preprocessed.fs, filt_fl, filt_fh, filt_order)
 # because of data padding, we apply a cut to the output
 pred = pred[:target.size]
 
@@ -162,3 +172,29 @@ logging.info('Writing output to {}'.format(params.out_file))
 series = TimeSeries(clean, t0=data.t0, sample_rate=data.fs, 
                     channel=params.out_channel, name=params.out_channel)
 series.write(params.out_file)
+
+# Save clean data and witness channels into a gwf file for the following layers of cleaning
+# if channels is a file
+if isinstance(params.chanslist, str):
+    channels = open(params.chanslist).read().splitlines()
+# if source is a file
+if isinstance(params.clean_source, str):
+    source = open(params.clean_source).read().splitlines()
+
+cleaned_out = os.path.join(params.out_dir, 'cleaned.gwf')
+raw_file = os.path.join(params.out_dir, 'raw.h5')
+out_dict = TimeSeriesDict.fromkeys(channels)
+out_dict[channels[0]] = series
+with h5py.File(raw_file, 'r') as f:
+    for key in channels[1:]:
+        ts = TimeSeries(
+            f[key][:],
+            t0=f[key].attrs['t0'],
+            sample_rate=f[key].attrs['sample_rate'],
+            channel=f[key].attrs['channel'],
+            name=f[key].attrs['name'],
+        )
+        out_dict[key] = ts
+
+logging.info('Writing output to {}'.format(cleaned_out))
+out_dict.write(cleaned_out, format='gwf')

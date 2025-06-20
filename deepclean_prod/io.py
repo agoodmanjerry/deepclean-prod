@@ -5,7 +5,8 @@ import configparser
 logger = logging.getLogger(__name__)
 
 ALL_PARAMS_KEYS = (
-    'ifo', 'chanslist', 't0', 't1', 'clean_t0', 'clean_duration', 'train_t0', 
+    'ifo', 'chanslist', 't0', 't1',
+    'clean_source', 'clean_t0', 'clean_duration', 'train_source', 'train_t0', 
     'train_duration', 'fs', 'train_frac', 'filt_fl', 'filt_fh', 'filt_order', 
     'train_kernel', 'train_stride', 'clean_kernel', 'clean_stride', 'pad_mode', 
     'window', 'batch_size', 'max_epochs', 'num_workers', 'lr', 'weight_decay', 

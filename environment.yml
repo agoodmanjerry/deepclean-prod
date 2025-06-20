@@ -1,4 +1,4 @@
-name: dc-prod-py36
+name: dc-prod-py36-2
 channels:
   - pytorch
   - conda-forge

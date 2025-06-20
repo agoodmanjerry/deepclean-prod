@@ -23,6 +23,7 @@ def parse_cmd():
         prog=os.path.basename(__file__), usage='%(prog)s [options]')
         
     # dataset arguments
+    parser.add_argument('--train-source', help='Path to the source to load data', type=str)
     parser.add_argument('--train-t0', help='GPS of the first sample', type=int)
     parser.add_argument('--train-duration', help='Duration of train/val frame', type=int)
     parser.add_argument('--chanslist', help='Path to channel list', type=str)
@@ -115,6 +116,24 @@ elif params.load_dataset:
 
     train_data.read(os.path.join(params.train_dir, 'training.h5'), params.chanslist)
     val_data.read(os.path.join(params.train_dir, 'validation.h5'), params.chanslist)
+elif (params.train_source is not None) and (params.train_t0 is not None):
+    train_source = params.train_source
+    train_t0 = params.train_t0
+    train_duration = int(params.train_duration * params.train_frac)
+    val_t0 = train_t0 + train_duration
+    val_duration = params.train_duration - train_duration
+    logging.info('Loading trianing data from {} .. {} from the source {}'.format(
+        train_t0, train_t0 + train_duration, train_source))
+    train_data.load_from_source(params.chanslist, train_source, train_t0, train_duration, params.fs)
+
+    logging.info('Loading validation data from {} .. {} from the source {}'.format(
+        val_t0, val_t0 + val_duration, train_source))
+    val_data.load_from_source(params.chanslist, train_source, val_t0, val_duration, params.fs)
+
+    # Save training/validation data if enabled
+    if params.save_dataset:
+        train_data.write(os.path.join(params.train_dir, 'training.h5'))
+        val_data.write(os.path.join(params.train_dir, 'validation.h5'))
 else:
     # Partition into training and validation dataset
     train_t0 = params.train_t0
