@@ -71,26 +71,29 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler,
         # Training
         train_loss = 0.
         model.train()
-        for i_batch, (data, target) in enumerate(train_loader):
+        for i_batch, (witness, target) in enumerate(train_loader):
             optimizer.zero_grad() # reset gradient
             
             # move batch to GPU if available
-            data = data.to(device)
+            witness = witness.to(device)
             target = target.to(device)
             
             # forward pass
-            pred = model(data)
+            pred = model(witness)
             
             # calculate loss function and backward pass
-            loss = criterion(pred, target)
+            loss = criterion(pred, target, witness)
             loss.backward()
+
+            # Clip gradients after backward but before step
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             # gradient descent
             optimizer.step()
             
             # Update training loss
             if criterion.reduction == 'mean':
-                train_loss += loss.item() * len(data)
+                train_loss += loss.item() * len(witness)
             else:
                 train_loss += loss.item()
         
@@ -99,24 +102,24 @@ def train(train_loader, model, criterion, optimizer, lr_scheduler,
         if val_loader is not None:
             model.eval()
             with torch.no_grad():
-                for i_batch, (data, target) in enumerate(val_loader):
+                for i_batch, (witness, target) in enumerate(val_loader):
                     # move batch to GPU if available
-                    data = data.to(device)
+                    witness = witness.to(device)
                     target = target.to(device)
                 
                     # forward pass
-                    pred = model(data)
+                    pred = model(witness)
                 
                     # calculate and update validation loss
-                    loss = criterion(pred, target)
+                    loss = criterion(pred, target, witness)
                     if criterion.reduction == 'mean':
-                        val_loss += loss.item() * len(data)
+                        val_loss += loss.item() * len(witness)
                     else:
                         val_loss += loss.item()
         
         # Compute average loss over all samples
         train_loss /= len(train_loader.dataset)
-        val_loss /= len(val_loader.dataset)
+        val_loss /= len(val_loader.dataset) if val_loader is not None else 1.0 # avoid divided by 0.
             
         # Update LR with scheduler at the end of each epoch
         if lr_scheduler is not None:
@@ -138,28 +141,30 @@ def evaluate(dataloader, model, criterion=None, device='cpu'):
     eval_loss = 0.
     prediction = []
     with torch.no_grad():
-        for i_batch, (data, target) in enumerate(dataloader):
+        for i_batch, (witness, target) in enumerate(dataloader):
             # move to GPU if available
-            data = data.to(device)
-            target = target.to(device)
+            witness = witness.to(device)
+            target = witness.to(device)
             
             # compute prediction
-            pred = model(data)
+            pred = model(witness)
             prediction.append(pred.cpu().numpy())
             
             # compute loss if criterion is given
             if criterion is not None:
                 loss = criterion(pred, target)
                 if criterion.reduction == 'mean':
-                    eval_loss += loss.item() * len(data)  
+                    eval_loss += loss.item() * len(witness)  
                 else:
                     eval_loss += loss.item()
     prediction = np.concatenate(prediction)
     
     # Averaging loss over the number of samples
-    eval_loss /= len(dataloader.dataset)
+    eval_loss /= len(dataloader.dataset) if criterion is not None else 1.0
     
     # Return prediction and loss (if criterion is given)
-    if criterion is not None:
-        return prediction, eval_loss
-    return prediction
+    # if criterion is not None:
+        # return prediction, eval_loss
+    # return prediction
+
+    return (prediction, eval_loss) if criterion is not None else prediction

@@ -39,6 +39,8 @@ def parse_cmd():
                         default=config.DEFAULT_FHIGH, nargs='+', type=float)
     parser.add_argument('--filt-order', help='Bandpass filter order', 
                         default=config.DEFAULT_FORDER, type=int)
+    parser.add_argument('--filter-pad', help='Length in second to cut from both edges after applying bandpass',
+                        default=config.DEFAULT_FILTERPAD, type=float)
     
     # timeseries arguments
     parser.add_argument('--train-kernel', help='Length of each segment in seconds', 
@@ -69,6 +71,12 @@ def parse_cmd():
                         default=config.DEFAULT_PSD_WEIGHT, type=float)
     parser.add_argument('--mse-weight', help='MSE weight of composite',
                         default=config.DEFAULT_MSE_WEIGHT, type=float)
+    parser.add_argument('--coh-weight', help='Coherence weight of composite loss',
+                        default=config.DEFAULT_COH_WEIGHT, type=float)  # NEW: Coherence loss weight, default to 0.0 if backward compatible
+    parser.add_argument('--tf-weight', help='Transfer Function weight of composite loss',
+                        default=config.DEFAULT_TF_WEIGHT, type=float)  # NEW: Transfer Function loss weight, default to 0.0 if backward compatible
+    parser.add_argument('--average', help='Average type for PSD computation',
+                        default='mean', type=str)
     
     # input/output arguments
     parser.add_argument('--train-dir', help='Path to training directory', 
@@ -159,8 +167,10 @@ logging.info('Preprocessing')
 # bandpass filter
 train_data = train_data.bandpass(
     params.filt_fl, params.filt_fh, params.filt_order, 'target')
+train_data.data = train_data.data[:, int(params.filter_pad * params.fs):-int(params.filter_pad * params.fs)]
 val_data = val_data.bandpass(
     params.filt_fl, params.filt_fh, params.filt_order, 'target')
+val_data.data = val_data.data[:, int(params.filter_pad * params.fs):-int(params.filter_pad * params.fs)]
 # normalization
 mean = train_data.mean
 std = train_data.std
@@ -190,10 +200,19 @@ model = model.to(device)  # transfer model to GPU if available
 logging.info(model)
 
 criterion = dc.criterion.CompositePSDLoss(
-    params.fs, params.filt_fl, params.filt_fh,
-    fftlength=params.fftlength, overlap=params.overlap, 
-    psd_weight=params.psd_weight, mse_weight=params.mse_weight, 
-    reduction='sum', device=device)
+    params.fs,
+    params.filt_fl,
+    params.filt_fh,
+    fftlength=params.fftlength,
+    overlap=params.overlap, 
+    psd_weight=params.psd_weight,
+    mse_weight=params.mse_weight,
+    coh_weight=params.coh_weight,   # NEW: Coherence loss weight
+    tf_weight=params.tf_weight,     # NEW: Transfer Function loss weight
+    reduction='sum',
+    device=device,
+    average=params.average
+)
 
 optimizer = optim.Adam(
     model.parameters(), lr=params.lr, weight_decay=params.weight_decay)
