@@ -39,8 +39,8 @@ def parse_cmd():
                         default=config.DEFAULT_FHIGH, nargs='+', type=float)
     parser.add_argument('--filt-order', help='Bandpass filter order', 
                         default=config.DEFAULT_FORDER, type=int)
-    parser.add_argument('--filter-pad', help='Length in second to cut from both edges after applying bandpass',
-                        default=config.DEFAULT_FILTERPAD, type=float)
+    parser.add_argument('--filt-pad', help='Length in second to cut from both edges after applying bandpass',
+                        default=config.DEFAULT_FPAD, type=float)
     
     # timeseries arguments
     parser.add_argument('--train-kernel', help='Length of each segment in seconds', 
@@ -167,10 +167,10 @@ logging.info('Preprocessing')
 # bandpass filter
 train_data = train_data.bandpass(
     params.filt_fl, params.filt_fh, params.filt_order, 'target')
-train_data.data = train_data.data[:, int(params.filter_pad * params.fs):-int(params.filter_pad * params.fs)]
+train_data.data = train_data.data[:, int(params.filt_pad * params.fs):-int(params.filt_pad * params.fs)]
 val_data = val_data.bandpass(
     params.filt_fl, params.filt_fh, params.filt_order, 'target')
-val_data.data = val_data.data[:, int(params.filter_pad * params.fs):-int(params.filter_pad * params.fs)]
+val_data.data = val_data.data[:, int(params.filt_pad * params.fs):-int(params.filt_pad * params.fs)]
 # normalization
 mean = train_data.mean
 std = train_data.std
@@ -185,6 +185,7 @@ with open(os.path.join(params.train_dir, 'ppr.bin'), 'wb') as f:
         'filt_fl': params.filt_fl,
         'filt_fh': params.filt_fh,
         'filt_order': params.filt_order,
+        'filt_pad': params.filt_pad,
     }, f, protocol=-1)
 
 # Read dataset into DataLoader

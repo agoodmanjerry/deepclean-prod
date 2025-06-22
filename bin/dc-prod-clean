@@ -120,6 +120,7 @@ with open(params.ppr_file, 'rb') as f:
     filt_fl = ppr['filt_fl']
     filt_fh = ppr['filt_fh']
     filt_order = ppr['filt_order']
+    filt_pad = ppr['filt_pad']
 # bandpass filter and normalization
 preprocessed = data.bandpass(filt_fl, filt_fh, filt_order, 'target')
 preprocessed = preprocessed.normalize(mean, std)
