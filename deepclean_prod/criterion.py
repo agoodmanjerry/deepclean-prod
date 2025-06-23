@@ -28,8 +28,8 @@ def _torch_welch(data, fs=1.0, nperseg=256, noverlap=None, average='mean', devic
     # calculate the FFT amplitude of each segment
     for i in range(nseg):
         seg_ts = data[:, i*nstride:i*nstride+nperseg]*window
-        seg_fd = torch.rfft(seg_ts, 1)
-        seg_fd_abs = (seg_fd[:, :, 0]**2 + seg_fd[:, :, 1]**2)
+        seg_fd = torch.fft.rfft(seg_ts)
+        seg_fd_abs = torch.real(seg_fd)**2 + torch.imag(seg_fd)**2
         psd[i] = seg_fd_abs
     
     # taking the average
@@ -103,12 +103,14 @@ def _torch_cross_welch(x, y, fs=1.0, nperseg=256, noverlap=None, average='mean',
         seg_y = y[:, i*nstride:i*nstride+nperseg] * window
 
         # Compute real FFT (returns complex in 2 parts)
-        X = torch.rfft(seg_x, 1)
-        Y = torch.rfft(seg_y, 1)
+        X = torch.fft.rfft(seg_x)
+        Y = torch.fft.rfft(seg_y)
 
         # Compute real and imaginary parts of cross spectrum: X * conj(Y)
-        real = X[..., 0]*Y[..., 0] + X[..., 1]*Y[..., 1]
-        imag = X[..., 1]*Y[..., 0] - X[..., 0]*Y[..., 1]
+        # real = X[..., 0]*Y[..., 0] + X[..., 1]*Y[..., 1]
+        # imag = X[..., 1]*Y[..., 0] - X[..., 0]*Y[..., 1]
+        real = torch.real(X)* torch.real(Y) + torch.imag(X)*torch.imag(Y)
+        imag = torch.imag(X)* torch.real(Y) - torch.real(X)*torch.imag(Y)
 
         # Store into cross-spectral tensor
         Sxy[i, ..., 0] = real
@@ -219,10 +221,10 @@ class PSDLoss(nn.Module):
         # Get scaling and masking
         freq = torch.linspace(0., fs/2., nperseg//2 + 1)
         self.dfreq = freq[1] - freq[0]
-        self.mask = torch.zeros(nperseg//2 +1).type(torch.ByteTensor)
+        self.mask = torch.zeros(nperseg//2 +1).type(torch.bool)
         self.scale = 0.
         for l, h in zip(fl, fh):
-            self.mask = self.mask | (l < freq) & (freq < h)
+            self.mask = self.mask | ((l < freq) & (freq < h))
             self.scale += (h - l)
         self.mask = self.mask.to(device)
     
@@ -287,13 +289,13 @@ class CoherenceLoss(nn.Module):
         freq = torch.linspace(0., fs/2., self.nperseg//2 + 1).to(device)
 
         # Create a frequency mask to select only frequencies within fl–fh
-        self.freq_mask = torch.zeros_like(freq).type(torch.uint8)
+        self.freq_mask = torch.zeros_like(freq).type(torch.bool)
         self.dfreq = freq[1] - freq[0]  # Frequency resolution
         self.scale = 0.                 # Used to normalize loss value 
 
         # Handle single or multiple bands (fl, fh)
         for l, h in zip(fl if isinstance(fl, (list, tuple)) else [fl], fh if isinstance(fh, (list, tuple)) else [fh]):
-            self.freq_mask |= (freq >= l) & (freq <= h)
+            self.freq_mask |= ((freq >= l) & (freq <= h))
             self.scale += (h - l)   # Total bandwidth
 
     def forward(self, pred, target, witness):

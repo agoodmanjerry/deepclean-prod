@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 
 # default plotting style
-plt.style.use('seaborn-colorblind')
+plt.style.use('seaborn-v0_8-colorblind')
 mpl.rc('font', size=15)
 mpl.rc('figure', figsize=(8, 5))
 
