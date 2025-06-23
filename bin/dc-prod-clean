@@ -165,14 +165,14 @@ clean = target - pred
 
 # Save clean data
 if params.out_file is None:
-    params.out_file = os.path.join(params.out_dir, 'clean.h5')
+    params.out_file = os.path.join(params.out_dir, 'clean-{}-{}.h5'.format(params.clean_t0, params.clean_duration))
 else:
     params.out_file = os.path.join(params.out_dir, params.out_file)
     
 logging.info('Writing output to {}'.format(params.out_file))
 series = TimeSeries(clean, t0=data.t0, sample_rate=data.fs, 
                     channel=params.out_channel, name=params.out_channel)
-series.write(params.out_file)
+series.write(params.out_file, format='gwf')
 
 # Save clean data and witness channels into a gwf file for the following layers of cleaning
 # if channels is a file
