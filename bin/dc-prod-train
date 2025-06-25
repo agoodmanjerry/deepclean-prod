@@ -23,7 +23,7 @@ def parse_cmd():
         prog=os.path.basename(__file__), usage='%(prog)s [options]')
         
     # dataset arguments
-    parser.add_argument('--train-source', help='Path to the source to load data', type=str)
+    parser.add_argument('--train-source', help='Path to the source file to load data', type=str)
     parser.add_argument('--train-t0', help='GPS of the first sample', type=int)
     parser.add_argument('--train-duration', help='Duration of train/val frame', type=int)
     parser.add_argument('--chanslist', help='Path to channel list', type=str)

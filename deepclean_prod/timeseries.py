@@ -60,13 +60,23 @@ class TimeSeriesDataset:
             source = open(source).read().splitlines()
 
         # load data and resample
-        data = TimeSeriesDict.read(
-            source=source,
-            channels=channels,
-            start=t0,
-            end=t0+duration,
-            nproc=nproc,
-        )
+        if source[0].endswith(('h5', 'hdf5')):
+            format = 'hdf5'
+            data = TimeSeriesDict.read(
+                source=source,
+                start=t0,
+                end=t0+duration,
+                nproc=nproc,
+                format=format,
+            )
+        else:
+            data = TimeSeriesDict.read(
+                source=source,
+                channels=channels,
+                start=t0,
+                end=t0+duration,
+                nproc=nproc,
+            )
 
         data = data.resample(fs)
 

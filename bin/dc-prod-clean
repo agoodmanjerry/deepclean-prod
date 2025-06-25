@@ -27,7 +27,7 @@ def parse_cmd():
         prog=os.path.basename(__file__), usage='%(prog)s [options]')
     
     # Dataset arguments
-    parser.add_argument('--clean-source', help='Path to the source to load data', type=str)
+    parser.add_argument('--clean-source', help='Path to the source file to load data', type=str)
     parser.add_argument('--clean-t0', help='GPS of the first sample', type=int)
     parser.add_argument('--clean-duration', help='Duration of frame', type=int)
     parser.add_argument('--chanslist', help='Path to channel list', type=str)
